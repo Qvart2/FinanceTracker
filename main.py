@@ -31,7 +31,6 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 
-# Глобальная переменная (все данные приложения)
 data = load_data()
 
 
