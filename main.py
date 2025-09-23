@@ -3,6 +3,9 @@ import os
 from kivy.app import App
 from kivy.lang import Builder
 from kivy.uix.screenmanager import ScreenManager, Screen
+from kivy.uix.label import Label
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
 
 
 # ---------------------------
@@ -50,7 +53,46 @@ class ExpenseScreen(Screen):
 
 
 class CategoryScreen(Screen):
-    pass
+    def on_pre_enter(self):
+        self.update_category_list()
+
+    def add_category(self, name):
+        name = (name or "").strip()
+        if not name:
+            return
+        if name not in data["categories"]:
+            data["categories"].append(name)
+            save_data(data)
+            self.update_category_list()
+
+    def remove_category(self, name):
+        if name in data["categories"]:
+            data["categories"].remove(name)
+            save_data(data)
+            self.update_category_list()
+
+    def update_category_list(self):
+        container = self.ids.category_list
+        container.clear_widgets()
+        for cat in data["categories"]:
+            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=40, spacing=10)
+
+            lbl = Label(text=cat, halign="left", valign="middle")
+            lbl.bind(size=lbl.setter("text_size"))  # перенос текста если длинный
+
+            btn = Button(
+                text="X",
+                size_hint=(None, None),
+                size=(40, 40),
+                background_color=(1, 0, 0, 1),
+                color=(1, 1, 1, 1),
+                on_release=lambda x, c=cat: self.remove_category(c)
+            )
+
+            row.add_widget(lbl)
+            row.add_widget(btn)
+            container.add_widget(row)
+
 
 
 class StatsScreen(Screen):
@@ -150,8 +192,38 @@ FinanceManager:
         padding: 20
 
         Label:
-            text: "Экран категорий"
-            font_size: "18sp"
+            text: "Категории расходов"
+            font_size: "20sp"
+
+        TextInput:
+            id: category_input
+            hint_text: "Введите название категории"
+            size_hint_y: None
+            height: 40
+
+        Button:
+            text: "Добавить категорию"
+            size_hint_y: None
+            height: 40
+            on_release:
+                root.add_category(category_input.text)
+                category_input.text = ""
+
+        Label:
+            text: "Список категорий:"
+            font_size: "16sp"
+
+        ScrollView:
+            do_scroll_x: False
+            do_scroll_y: True
+
+            BoxLayout:
+                id: category_list
+                orientation: "vertical"
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: 5
+                padding: 5
 
         Button:
             text: "Назад"
