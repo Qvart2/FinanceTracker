@@ -49,8 +49,28 @@ class WalletScreen(Screen):
 
 
 class ExpenseScreen(Screen):
-    pass
+    """
+    Экран добаления доходов и расходов
+    """
+    def add_income(self):
+        """Добавление дохода"""
+        val = float(self.ids.sum_input.text)
+        data.setdefault("incomes").append({"amount": val})
+        save_data(data)
 
+    def add_expense(self):
+        """Добавление расхода"""
+        val = float(self.ids.sum_input.text)
+        data.setdefault("expenses").append({"amount": val})
+        save_data(data)
+
+    def list_actions(self):
+        """"Получение списка доходов и расходов"""
+        pass
+
+    def remove_record(self):
+        """"Удаление записи"""
+        pass
 
 class CategoryScreen(Screen):
     def on_pre_enter(self):
@@ -172,17 +192,41 @@ FinanceManager:
         orientation: "vertical"
         spacing: 10
         padding: 20
-
         Label:
-            text: "Экран доходов/расходов"
+            text: "Добавление доходов и расходов"
             font_size: "18sp"
 
-        Button:
-            text: "Назад"
-            size_hint: None, None
-            size: 200, 50
-            pos_hint: {"center_x": 0.5}
-            on_release: app.root.current = "menu"
+        TextInput:
+            id: sum_input
+            hint_text: "Введите доход или расход"
+
+            input_filter: "float"
+            multiline: False
+            size_hint_y: None
+            height: "40dp"
+
+        BoxLayout:
+            size_hint_y: None
+
+            height: "120dp"
+            orientation: "vertical"
+            spacing: 8
+
+            Button:
+                text: "Добавить доходы"
+                on_release: root.add_income()
+
+            Button:
+                text: "Добавить расходы"
+                on_release: root.add_expense()
+
+            Button:
+                text: "Назад"
+                size_hint: None, None
+                size: 200, 50
+                pos_hint: {"center_x": 0.5}
+                on_release: app.root.current = "menu"
+        AnchorLayout
 
 <CategoryScreen>:
     name: "categories"
