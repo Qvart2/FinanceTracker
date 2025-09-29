@@ -47,7 +47,6 @@ class MainMenu(Screen):
 class WalletScreen(Screen):
     pass
 
-
 class ExpenseScreen(Screen):
     """
     Экран добаления доходов и расходов
@@ -94,25 +93,43 @@ class CategoryScreen(Screen):
     def update_category_list(self):
         container = self.ids.category_list
         container.clear_widgets()
-        for cat in data["categories"]:
-            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=40, spacing=10)
 
-            lbl = Label(text=cat, halign="left", valign="middle")
-            lbl.bind(size=lbl.setter("text_size"))  # перенос текста если длинный
+        for cat in data["categories"]:
+            row = BoxLayout(
+                orientation="horizontal",
+                size_hint_y=None,
+                height=48,
+                spacing=10,
+                padding=[6, 6]
+            )
+
+            # Лейбл категории
+            lbl = Label(
+                text=cat,
+                halign="left",
+                valign="middle",
+                size_hint_x=1,
+                color=(0, 0, 0, 1),
+                font_size=16
+            )
+            lbl.bind(
+                size=lambda instance, value: setattr(instance, "text_size", (instance.width, None))
+            )
 
             btn = Button(
                 text="X",
                 size_hint=(None, None),
-                size=(40, 40),
-                background_color=(1, 0, 0, 1),
-                color=(1, 1, 1, 1),
-                on_release=lambda x, c=cat: self.remove_category(c)
+                size=(36, 36),
+                font_size=18,
+                background_normal="",
+                background_color=(0.85, 0.2, 0.2, 1),
+                color=(1, 1, 1, 1)
             )
+            btn.bind(on_release=lambda widget, c=cat: self.remove_category(c))
 
             row.add_widget(lbl)
             row.add_widget(btn)
             container.add_widget(row)
-
 
 
 class StatsScreen(Screen):
@@ -127,9 +144,30 @@ class FinanceManager(ScreenManager):
 
 
 # ---------------------------
-# KV-разметка (основной UI)
+# KV-разметка
 # ---------------------------
 kv = """
+#:import rgba kivy.utils.get_color_from_hex
+
+<StyledButton@Button>:
+    size_hint_y: None
+    height: 45
+    background_normal: ""
+    background_color: rgba("#4d6fa3")
+    color: 1, 1, 1, 1
+    font_size: 16
+    bold: True
+
+<StyledLabel@Label>:
+    font_size: 20
+    color: 0, 0, 0, 1
+
+<TextInput>:
+    background_color: 1, 1, 1, 1
+    foreground_color: 0, 0, 0, 1
+    padding: [10, 10]
+    font_size: 16
+
 FinanceManager:
     MainMenu:
     WalletScreen:
@@ -141,31 +179,39 @@ FinanceManager:
     name: "menu"
     BoxLayout:
         orientation: "vertical"
-        spacing: 10
-        padding: 20
+        spacing: 15
+        padding: 30
+        canvas.before:
+            Color:
+                rgba: rgba("#F0F0F0")
+            Rectangle:
+                pos: self.pos
+                size: self.size
 
-        Label:
+        StyledLabel:
             text: "Финансовый менеджер"
-            font_size: "24sp"
+            font_size: 28
+            bold: True
 
-        Button:
+        StyledButton:
             text: "Кошельки"
             on_release: app.root.current = "wallets"
 
-        Button:
+        StyledButton:
             text: "Доходы и расходы"
             on_release: app.root.current = "expenses"
 
-        Button:
+        StyledButton:
             text: "Категории"
             on_release: app.root.current = "categories"
 
-        Button:
+        StyledButton:
             text: "Статистика"
             on_release: app.root.current = "stats"
 
-        Button:
+        StyledButton:
             text: "Выход"
+            background_color: rgba("#E74C3C")
             on_release: app.stop()
 
 <WalletScreen>:
@@ -174,16 +220,19 @@ FinanceManager:
         orientation: "vertical"
         spacing: 10
         padding: 20
+        canvas.before:
+            Color:
+                rgba: rgba("#F0F0F0")
+            Rectangle:
+                pos: self.pos
+                size: self.size
 
-        Label:
-            text: "Экран кошельков (тут будет список и добавление)"
-            font_size: "18sp"
+        StyledLabel:
+            text: "Экран кошельков"
+            font_size: 22
 
-        Button:
+        StyledButton:
             text: "Назад"
-            size_hint: None, None
-            size: 200, 50
-            pos_hint: {"center_x": 0.5}
             on_release: app.root.current = "menu"
 
 <ExpenseScreen>:
@@ -192,41 +241,37 @@ FinanceManager:
         orientation: "vertical"
         spacing: 10
         padding: 20
-        Label:
+        canvas.before:
+            Color:
+                rgba: rgba("#F0F0F0")
+            Rectangle:
+                pos: self.pos
+                size: self.size
+
+        StyledLabel:
             text: "Добавление доходов и расходов"
-            font_size: "18sp"
+            font_size: 22
 
         TextInput:
             id: sum_input
-            hint_text: "Введите доход или расход"
-
+            hint_text: "Введите сумму"
             input_filter: "float"
             multiline: False
             size_hint_y: None
-            height: "40dp"
+            height: 45
 
-        BoxLayout:
-            size_hint_y: None
+        StyledButton:
+            text: "Добавить доход"
+            on_release: root.add_income()
 
-            height: "120dp"
-            orientation: "vertical"
-            spacing: 8
+        StyledButton:
+            text: "Добавить расход"
+            on_release: root.add_expense()
 
-            Button:
-                text: "Добавить доходы"
-                on_release: root.add_income()
-
-            Button:
-                text: "Добавить расходы"
-                on_release: root.add_expense()
-
-            Button:
-                text: "Назад"
-                size_hint: None, None
-                size: 200, 50
-                pos_hint: {"center_x": 0.5}
-                on_release: app.root.current = "menu"
-        AnchorLayout
+        StyledButton:
+            text: "Назад"
+            background_color: rgba("#95A5A6")
+            on_release: app.root.current = "menu"
 
 <CategoryScreen>:
     name: "categories"
@@ -234,28 +279,32 @@ FinanceManager:
         orientation: "vertical"
         spacing: 10
         padding: 20
+        canvas.before:
+            Color:
+                rgba: rgba("#F0F0F0")
+            Rectangle:
+                pos: self.pos
+                size: self.size
 
-        Label:
+        StyledLabel:
             text: "Категории расходов"
-            font_size: "20sp"
+            font_size: 22
 
         TextInput:
             id: category_input
             hint_text: "Введите название категории"
             size_hint_y: None
-            height: 40
+            height: 45
 
-        Button:
+        StyledButton:
             text: "Добавить категорию"
-            size_hint_y: None
-            height: 40
             on_release:
                 root.add_category(category_input.text)
                 category_input.text = ""
 
-        Label:
+        StyledLabel:
             text: "Список категорий:"
-            font_size: "16sp"
+            font_size: 18
 
         ScrollView:
             do_scroll_x: False
@@ -269,11 +318,9 @@ FinanceManager:
                 spacing: 5
                 padding: 5
 
-        Button:
+        StyledButton:
             text: "Назад"
-            size_hint: None, None
-            size: 200, 50
-            pos_hint: {"center_x": 0.5}
+            background_color: rgba("#95A5A6")
             on_release: app.root.current = "menu"
 
 <StatsScreen>:
@@ -282,16 +329,20 @@ FinanceManager:
         orientation: "vertical"
         spacing: 10
         padding: 20
+        canvas.before:
+            Color:
+                rgba: rgba("#F0F0F0")
+            Rectangle:
+                pos: self.pos
+                size: self.size
 
-        Label:
+        StyledLabel:
             text: "Экран статистики"
-            font_size: "18sp"
+            font_size: 22
 
-        Button:
+        StyledButton:
             text: "Назад"
-            size_hint: None, None
-            size: 200, 50
-            pos_hint: {"center_x": 0.5}
+            background_color: rgba("#95A5A6")
             on_release: app.root.current = "menu"
 """
 
