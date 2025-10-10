@@ -1,5 +1,8 @@
 import json
 import os
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime
 from kivy.app import App
 from kivy.lang import Builder
 from kivy.uix.screenmanager import ScreenManager, Screen
@@ -35,6 +38,31 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
+from datetime import datetime
+
+def update_exchange_rates():
+    """Загружает курсы валют с сайта ЦБ РФ и сохраняет их в data."""
+    global data
+    url = "https://www.cbr.ru/scripts/XML_daily.asp"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        xml_data = ET.fromstring(response.text)
+
+        rates = {"RUB": 1.0}
+        for valute in xml_data.findall("Valute"):
+            code = valute.find("CharCode").text
+            rate = float(valute.find("Value").text.replace(",", "."))
+            nominal = int(valute.find("Nominal").text)
+            rates[code] = rate / nominal
+
+        data["currencies"] = rates
+        data["last_rates_update"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+        save_data(data)
+        return True
+    except Exception as e:
+        print("Ошибка при обновлении курсов:", e)
+        return False
 
 # Глобальные данные, загружаем один раз при старте
 data = load_data()
@@ -81,8 +109,22 @@ class MainMenu(Screen):
 
 class WalletScreen(Screen):
     def on_pre_enter(self):
-        """Обновляет список кошельков при открытии экрана."""
+        """Обновляет список кошельков и дату курсов при открытии экрана."""
         self.update_wallet_list()
+        # 🟩 добавь вот эту строку:
+        self.ids.last_update_label.text = f"Курсы обновлены: {data.get('last_rates_update', 'неизвестно')}"
+
+
+    def update_rates(self):
+        """Обновляет курсы валют с сайта ЦБ РФ."""
+        if update_exchange_rates():
+            popup = Popup(title="Успешно", content=Label(text="Курсы валют обновлены!"), size_hint=(0.6, 0.3))
+            popup.open()
+        else:
+            popup = Popup(title="Ошибка", content=Label(text="Не удалось обновить курсы."), size_hint=(0.6, 0.3))
+            popup.open()
+
+        self.ids.last_update_label.text = f"Курсы обновлены: {data.get('last_rates_update', 'неизвестно')}"
 
     def update_wallet_list(self):
         """Обновляет список кошельков на экране."""
@@ -93,15 +135,31 @@ class WalletScreen(Screen):
             container.add_widget(Label(text="Список кошельков пуст.", font_size="16sp", color=(0, 0, 0, 1)))
         else:
             for wallet in data["wallets"]:
+                # Пропускаем некорректные записи
+                if not all(k in wallet for k in ("name", "currency", "balance")):
+                    continue
+
+                # Вычисляем курс и рублёвое значение
+                rate = data.get("currencies", {}).get(wallet["currency"], 1)
+                try:
+                    rub_value = float(wallet["balance"]) * rate
+                except (TypeError, ValueError):
+                    rub_value = 0.0
+
+                # Формируем строку текста
+                text = f"Имя: {wallet['name']}, Баланс: {wallet['balance']} {wallet['currency']} (≈ {rub_value:.2f} RUB)"
+
+                # Элементы интерфейса
                 wallet_layout = BoxLayout(orientation="horizontal", size_hint_y=None, height=40, spacing=10, padding=[6, 6])
                 wallet_label = Label(
-                    text=f"Имя: {wallet['name']}, Баланс: {wallet['balance']} {wallet['currency']}",
+                    text=text,
                     size_hint_x=0.8,
                     halign="left",
                     valign="middle",
-                    color=(0, 0, 0, 1)  # ← добавлен чёрный цвет текста
+                    color=(0, 0, 0, 1)
                 )
                 wallet_label.bind(size=lambda lbl, _: setattr(lbl, "text_size", (lbl.width, None)))
+
                 delete_button = Button(
                     text="Удалить",
                     size_hint_x=0.2,
@@ -110,38 +168,71 @@ class WalletScreen(Screen):
                     color=(1, 1, 1, 1),
                     on_release=lambda btn, name=wallet["name"]: self.confirm_delete_wallet(name)
                 )
+
                 wallet_layout.add_widget(wallet_label)
                 wallet_layout.add_widget(delete_button)
                 container.add_widget(wallet_layout)
 
 
+
     def show_add_wallet_form(self, *args):
         """Показывает форму для добавления кошелька."""
-        box = BoxLayout(orientation="vertical", spacing=10, padding=10)
-        self.wallet_name_input = TextInput(hint_text="Имя кошелька", multiline=False)
-        self.wallet_currency_input = TextInput(hint_text="Валюта", multiline=False)
-        self.wallet_balance_input = TextInput(hint_text="Баланс", multiline=False, input_filter="float")
+        from kivy.uix.spinner import Spinner
 
+        # Список валют: отображаем красиво, сохраняем код
+        self.CURRENCY_LABELS = {
+            "RUB": "Рубль (RUB)",
+            "USD": "Доллар (USD)",
+            "EUR": "Евро (EUR)"
+        }
+
+        box = BoxLayout(orientation="vertical", spacing=10, padding=10)
+
+        # Поле для имени кошелька
+        self.wallet_name_input = TextInput(hint_text="Имя кошелька", multiline=False)
         box.add_widget(self.wallet_name_input)
-        box.add_widget(self.wallet_currency_input)
+
+        # Выпадающий список валют
+        self.wallet_currency_spinner = Spinner(
+            text="Выберите валюту",
+            values=list(self.CURRENCY_LABELS.values()),
+            size_hint_y=None,
+            height=44
+        )
+        box.add_widget(self.wallet_currency_spinner)
+
+        # Поле для баланса
+        self.wallet_balance_input = TextInput(hint_text="Баланс", multiline=False, input_filter="float")
         box.add_widget(self.wallet_balance_input)
 
+        # Кнопка сохранения
         save_button = Button(text="Сохранить", size_hint_y=None, height=44)
         save_button.bind(on_release=self.save_wallet)
         box.add_widget(save_button)
 
+        # Окно добавления
         self.add_wallet_popup = Popup(title="Добавить кошелёк", content=box, size_hint=(0.9, 0.6))
         self.add_wallet_popup.open()
 
     def save_wallet(self, instance):
         """Сохраняет новый кошелёк и обновляет список."""
         name = (self.wallet_name_input.text or "").strip()
-        currency = (self.wallet_currency_input.text or "").strip()
         balance_text = (self.wallet_balance_input.text or "0").strip()
+        selected_label = self.wallet_currency_spinner.text
+
+        # Определяем код валюты из выбранной надписи
+        currency = None
+        for code, label in self.CURRENCY_LABELS.items():
+            if label == selected_label:
+                currency = code
+                break
+
+        # Проверки
         if not name or not currency:
-            error_popup = Popup(title="Ошибка", content=Label(text="Введите имя и валюту!"), size_hint=(0.6, 0.3))
+            error_popup = Popup(title="Ошибка", content=Label(text="Введите имя и выберите валюту!"), size_hint=(0.6, 0.3))
             error_popup.open()
             return
+
         try:
             balance = float(balance_text)
             add_wallet(name, currency, balance)
@@ -150,6 +241,7 @@ class WalletScreen(Screen):
         except ValueError:
             error_popup = Popup(title="Ошибка", content=Label(text="Неверный формат баланса!"), size_hint=(0.6, 0.3))
             error_popup.open()
+
 
     def confirm_delete_wallet(self, name):
         """Показывает диалог подтверждения удаления кошелька."""
@@ -409,6 +501,25 @@ FinanceManager:
                 text: "Итоговый баланс"
                 on_release: root.show_total_balance()
 
+            StyledButton:
+                text: "Обновить курсы"
+                on_release: root.update_rates()
+
+        BoxLayout:
+            size_hint_y: None
+            height: 25
+            padding: [5, 0, 5, 0]
+
+            Label:
+                id: last_update_label
+                text: "Курсы обновлены: неизвестно"
+                font_size: 13
+                color: 0.4, 0.4, 0.4, 1   # серый текст
+                halign: "right"
+                valign: "middle"
+                text_size: self.size
+
+
         StyledButton:
             text: "Назад"
             background_color: rgba("#95A5A6")
@@ -531,8 +642,19 @@ FinanceManager:
 # ---------------------------
 class FinanceApp(App):
     def build(self):
-        return Builder.load_string(kv)
+        # При запуске проверяем и обновляем курсы валют
+        if "currencies" not in data or not data["currencies"]:
+            print("Курсы валют не найдены, загружаем с сайта ЦБ...")
+            update_exchange_rates()
+        else:
+            # Попробуем тихо обновить курсы (если есть интернет)
+            try:
+                update_exchange_rates()
+                print("Курсы валют успешно обновлены при запуске.")
+            except Exception as e:
+                print("Не удалось обновить курсы при запуске:", e)
 
+        return Builder.load_string(kv)
 
 if __name__ == "__main__":
     FinanceApp().run()
