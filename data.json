@@ -1,10 +1,6 @@
 {
-    "wallets": [
-        {}
-    ],
+    "wallets": [],
     "incomes": [],
-    "expenses": [
-        {}
-    ],
+    "expenses": [],
     "categories": []
 }
