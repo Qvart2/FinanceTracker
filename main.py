@@ -111,7 +111,6 @@ class WalletScreen(Screen):
     def on_pre_enter(self):
         """Обновляет список кошельков и дату курсов при открытии экрана."""
         self.update_wallet_list()
-        # 🟩 добавь вот эту строку:
         self.ids.last_update_label.text = f"Курсы обновлены: {data.get('last_rates_update', 'неизвестно')}"
 
 
