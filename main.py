@@ -179,7 +179,6 @@ class WalletScreen(Screen):
         """Показывает форму для добавления кошелька."""
         from kivy.uix.spinner import Spinner
 
-        # Список валют: отображаем красиво, сохраняем код
         self.CURRENCY_LABELS = {
             "RUB": "Рубль (RUB)",
             "USD": "Доллар (USD)",
