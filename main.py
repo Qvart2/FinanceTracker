@@ -111,6 +111,7 @@ class WalletScreen(Screen):
     def on_pre_enter(self):
         """Обновляет список кошельков и дату курсов при открытии экрана."""
         self.update_wallet_list()
+        # 🟩 добавь вот эту строку:
         self.ids.last_update_label.text = f"Курсы обновлены: {data.get('last_rates_update', 'неизвестно')}"
 
 
@@ -178,6 +179,7 @@ class WalletScreen(Screen):
         """Показывает форму для добавления кошелька."""
         from kivy.uix.spinner import Spinner
 
+        # Список валют: отображаем красиво, сохраняем код
         self.CURRENCY_LABELS = {
             "RUB": "Рубль (RUB)",
             "USD": "Доллар (USD)",
@@ -286,31 +288,250 @@ class ExpenseScreen(Screen):
     """
     Экран добаления доходов и расходов
     """
-    def add_income(self):
-        """Добавление дохода"""
-        try:
-            val = float(self.ids.sum_input.text)
-        except (ValueError, TypeError):
+    def on_pre_enter(self):
+        """Обновляет списки доходов и расходов"""
+        self.update_lists()
+
+    def show_add_ExpenseIncome_form(self, *args):
+        """Показывает форму для добавления записей"""
+        from kivy.uix.spinner import Spinner
+
+        self.CURRENCY_LABELS = {
+            "RUB": "Рубль (RUB)",
+            "USD": "Доллар (USD)",
+            "EUR": "Евро (EUR)"
+        }
+
+        box = BoxLayout(orientation="vertical", spacing=10, padding=10)
+
+        # Выпадающий список для выбора действия доход/расход
+        self.action_spinner = Spinner(
+            text="Выберите действие",
+            values=["Добавить расход", "Добавить доход"],
+            size_hint_y=None,
+            height=44
+        )
+        box.add_widget(self.action_spinner)
+
+        # Выпадающий список валют
+        self.wallet_currency_spinner = Spinner(
+            text="Выберите валюту",
+            values=list(self.CURRENCY_LABELS.values()),
+            size_hint_y=None,
+            height=44
+        )
+        box.add_widget(self.wallet_currency_spinner)
+
+        # Поле ввода суммы
+        self.amount_input = TextInput(hint_text="Сумма", multiline=False, input_filter="float")
+        box.add_widget(self.amount_input)
+
+        # Кнопка сохранения
+        save_button = Button(text="Сохранить", size_hint_y=None, height=44)
+        save_button.bind(on_release=self.save_record)
+        box.add_widget(save_button)
+
+        # Окно добавления
+        self.add_wallet_popup = Popup(title="Добавить запись", content=box, size_hint=(0.9, 0.5))
+        self.add_wallet_popup.open()
+
+    def update_lists(self):
+        """Обновляем списки"""
+        self.populate_record_list(self.ids.income_list, data.get("incomes", []), "incomes")
+        self.populate_record_list(self.ids.expense_list, data.get("expenses", []), "expenses")
+
+    def populate_record_list(self, container, records, key):
+        """Заполняем контейнер записями"""
+        container.clear_widgets()
+        if not records:
+            container.add_widget(Label(text="Пусто", size_hint_y=None, height=36, color=(0,0,0,1)))
             return
-        data.setdefault("incomes", []).append({"amount": val})
+
+        rates = data.get("currencies", {}) or {}
+
+        for rec in records:
+            rid = rec.get("id", "")
+            cur = rec.get("currency", "")
+            amt = rec.get("amount", "")
+            txt = f"id: {rid} | {amt} {cur}"
+
+            try:
+                amount = float(amt)
+            except (TypeError, ValueError):
+                amount = 0.0
+
+            rate = rates.get(cur, 1.0)
+            try:
+                rub_value = amount * float(rate)
+            except Exception:
+                rub_value = 0.0
+
+            txt = f"id: {rid} | {amount} {cur} (≈ {rub_value:.2f} RUB)"
+
+            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=44, spacing=8, padding=[6,6])
+
+            lbl = Label(text=txt, size_hint_x=0.78, halign="left", valign="middle", color=(0,0,0,1))
+            lbl.bind(size=lambda inst, val: setattr(inst, "text_size", (inst.width, None)))
+
+            btn = Button(text="Удалить", size_hint_x=0.22, background_normal="", background_color=(0.8,0.2,0.2,1), color=(1,1,1,1))
+            btn.bind(on_release=lambda b, k=key, r=rid: self.confirm_delete_record(k, r))
+
+            row.add_widget(lbl)
+            row.add_widget(btn)
+            container.add_widget(row)
+
+
+    def save_record(self, instance):
+        """Сохраняет новую запись"""
+        amount_text = (self.amount_input.text or "0").strip()
+        selected_label = self.wallet_currency_spinner.text
+
+        # Определяем валюту из выбранной надписи
+        currency = next((code for code, label in self.CURRENCY_LABELS.items() if label == selected_label), None)
+        if not currency:
+            Popup(title="Ошибка", content=Label(text="Выберите валюту!"), size_hint=(0.6, 0.3)).open()
+            return
+
+        try:
+            amount = float(amount_text)
+        except ValueError:
+            Popup(title="Ошибка", content=Label(text="Неверный формат суммы!"), size_hint=(0.6, 0.3)).open()
+            return
+
+        # Определяем ключ incomes/expenses
+        action_text = (self.action_spinner.text or "").lower()
+        if "доход" in action_text:
+            key = "incomes"
+        elif "расход" in action_text:
+            key = "expenses"
+        else:
+            Popup(title="Ошибка", content=Label(text="Выберите действие: доход или расход!"), size_hint=(0.6, 0.3)).open()
+            return
+
+        new_id = self.numbering_id(key)
+        record = {"id": new_id, "currency": currency, "amount": amount}
+        data.setdefault(key, []).append(record)
         save_data(data)
 
-    def add_expense(self):
-        """Добавление расхода"""
         try:
-            val = float(self.ids.sum_input.text)
-        except (ValueError, TypeError):
+            if hasattr(self, "add_wallet_popup"):
+                self.add_wallet_popup.dismiss()
+        except Exception:
+            pass
+        
+        self.update_lists()
+
+    def show_list(self, key):
+        """Показывает список записей"""
+        container = self.ids.rec_list
+        container.clear_widgets()
+
+        records = data.get(key) or []
+        if not records:
+            container.add_widget(Label(text="Список пустой", size_hint_y=None, height=40, color=(0, 0, 0, 1)))
             return
-        data.setdefault("expenses", []).append({"amount": val})
+
+        rates = data.get("currencies", {}) or {}
+        
+        for rec in records:
+            rid = rec.get("id", "")
+            cur = rec.get("currency", "")
+            amt = rec.get("amount", "")
+            text = f"id: {rid} | {amt} {cur}"
+
+            try:
+                amount = float(amt)
+            except (TypeError, ValueError):
+                amount = 0.0
+
+            rate = rates.get(cur, 1.0)
+            try:
+                rub_value = amount * float(rate)
+            except Exception:
+                rub_value = 0.0
+
+            text = f"id: {rid} | {amount} {cur} (≈ {rub_value:.2f} RUB)"
+
+            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=48, spacing=10, padding=[6, 6])
+            
+            lbl = Label(
+                text=text,
+                size_hint_x=0.8,
+                halign="left",
+                valign="middle",
+                color=(0, 0, 0, 1)
+            )
+            lbl.bind(size=lambda instance, value: setattr(instance, "text_size", (instance.width, None)))
+
+            delete_button = Button(
+                text="Удалить",
+                size_hint_x=0.2,
+                background_normal="",
+                background_color=(0.8, 0.2, 0.2, 1),
+                color=(1, 1, 1, 1)
+            )
+            delete_button.bind(on_release=lambda btn, k=key, r=rid: self.confirm_delete_record(k, r))
+
+            row.add_widget(lbl)
+            row.add_widget(delete_button)
+            container.add_widget(row)
+
+    def confirm_delete_record(self, key, rec_id):
+        """Подтверждение удаления записи"""
+        self.del_key = key
+        self.del_id = rec_id
+        
+        box = BoxLayout(orientation="vertical", padding=10, spacing=10)
+        box.add_widget(Label(text=f"Удалить запись id={rec_id}?"))
+        btn_layout = BoxLayout(size_hint_y=None, height=48, spacing=10)
+        yes = Button(text="Да")
+        no = Button(text="Нет")
+        yes.bind(on_release=self.delete_record_confirmed)
+        no.bind(on_release=self.delete_record_canceled)
+        btn_layout.add_widget(yes)
+        btn_layout.add_widget(no)
+        box.add_widget(btn_layout)
+
+        self.del_popup = Popup(title="Подтверждение удаления", content=box, size_hint=(0.6, 0.4))
+        self.del_popup.open()
+
+    def delete_record_confirmed(self, instance):
+        """Удаление записи"""
+        key = getattr(self, "del_key", None)
+        rid = getattr(self, "del_id", None)
+        if key is None or rid is None:
+            if hasattr(self, "del_popup"):
+                self.del_popup.dismiss()
+            return
+
+        records = data.get(key) or []
+        new_list = [r for r in records if r.get("id") != rid]
+        data[key] = new_list
         save_data(data)
+        self.update_lists()
+        
+        if hasattr(self, "del_popup"):
+            self.del_popup.dismiss()
 
-    def list_actions(self):
-        """"Получение списка доходов и расходов"""
-        pass
+    def delete_record_canceled(self, instance):
+        """Отмена удаления."""
+        if hasattr(self, "del_popup"):
+            self.del_popup.dismiss()
 
-    def remove_record(self):
-        """"Удаление записи"""
-        pass
+    # TODO: Можно убрать нумерацию id, т.к id уже не нужен для удаления записи, но пока оставил, возможно будет удобен для конкретики
+    @staticmethod
+    def numbering_id(key):
+        """Нумерация id"""
+        rec = data.get(key) or []
+        try:
+            existing = set(int(item.get("id", 0)) for item in rec if isinstance(item, dict) and "id" in item)
+        except Exception:
+            existing = set()
+
+        new_id = 1
+        while new_id in existing:
+            new_id += 1
+        return new_id
 
 
 class CategoryScreen(Screen):
@@ -537,27 +758,76 @@ FinanceManager:
                 size: self.size
 
         StyledLabel:
-            text: "Добавление доходов и расходов"
+            text: "Доходы и расходы"
             font_size: 22
-
-        TextInput:
-            id: sum_input
-            hint_text: "Введите сумму"
-            input_filter: "float"
-            multiline: False
             size_hint_y: None
-            height: 45
+            height: 40
 
-        StyledButton:
-            text: "Добавить доход"
-            on_release: root.add_income()
+        BoxLayout:
+            size_hint_y: None
+            height: "40dp"
+            spacing: 10
 
-        StyledButton:
-            text: "Добавить расход"
-            on_release: root.add_expense()
+            StyledButton:
+                text: "Добавить запись"
+                on_release: root.show_add_ExpenseIncome_form()
+
+        BoxLayout:
+            orientation: "horizontal"
+            spacing: 10
+            size_hint_y: 1
+
+            BoxLayout:
+                orientation: "vertical"
+                size_hint_x: 0.5
+                spacing: 6
+
+                StyledLabel:
+                    text: "Доходы"
+                    font_size: 18
+                    size_hint_y: None
+                    height: 30
+
+                ScrollView:
+                    do_scroll_x: False
+                    do_scroll_y: True
+
+                    BoxLayout:
+                        id: income_list
+                        orientation: "vertical"
+                        size_hint_y: None
+                        height: self.minimum_height
+                        spacing: 5
+                        padding: 5
+
+            BoxLayout:
+                orientation: "vertical"
+                size_hint_x: 0.5
+                spacing: 6
+
+                StyledLabel:
+                    text: "Расходы"
+                    font_size: 18
+                    size_hint_y: None
+                    height: 30
+
+                ScrollView:
+                    do_scroll_x: False
+                    do_scroll_y: True
+
+                    BoxLayout:
+                        id: expense_list
+                        orientation: "vertical"
+                        size_hint_y: None
+                        height: self.minimum_height
+                        spacing: 5
+                        padding: 5
 
         StyledButton:
             text: "Назад"
+            size_hint_y: None
+            height: "48dp"
+            size_hint_x: 1
             background_color: rgba("#95A5A6")
             on_release: app.root.current = "menu"
 
