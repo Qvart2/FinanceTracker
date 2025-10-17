@@ -3,6 +3,8 @@ import os
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
+import matplotlib.pyplot as plt
+from kivy_garden.matplotlib import FigureCanvasKivyAgg
 from kivy.app import App
 from kivy.lang import Builder
 from kivy.uix.screenmanager import ScreenManager, Screen
@@ -660,8 +662,82 @@ class CategoryScreen(Screen):
 
 
 class StatsScreen(Screen):
-    pass
+    def on_pre_enter(self):
+        self.update_charts()
 
+    def update_charts(self):
+        box = self.ids.stats_box
+        box.clear_widgets()
+
+        incomes = data.get("incomes", [])
+        expenses = data.get("expenses", [])
+
+        # --- ЛИНЕЙНЫЙ ГРАФИК ---
+        fig1, ax1 = plt.subplots(figsize=(6, 3))
+        incomes_by_day = self.aggregate_by_day(incomes)
+        expenses_by_day = self.aggregate_by_day(expenses)
+
+        days = sorted(set(incomes_by_day.keys()) | set(expenses_by_day.keys()))
+        income_values = [incomes_by_day.get(d, 0) for d in days]
+        expense_values = [expenses_by_day.get(d, 0) for d in days]
+
+        if days:
+            ax1.plot(days, income_values, label="Доходы", linewidth=2, marker="o", color="green")
+            ax1.plot(days, expense_values, label="Расходы", linewidth=2, marker="o", color="red")
+            ax1.set_title("Доходы и расходы по датам")
+            ax1.set_xlabel("Дата")
+            ax1.set_ylabel("Сумма")
+            ax1.legend()
+            ax1.grid(True)
+        else:
+            ax1.text(0.5, 0.5, "Нет данных для отображения", ha="center", va="center")
+
+        fig1.tight_layout()
+        graph_widget1 = FigureCanvasKivyAgg(fig1)
+        graph_widget1.size_hint_y = None
+        graph_widget1.height = 400
+        box.add_widget(graph_widget1)
+
+        # --- КРУГОВАЯ ДИАГРАММА ---
+        fig2, ax2 = plt.subplots(figsize=(4, 4))
+        category_totals = self.aggregate_by_category(expenses)
+
+        if category_totals:
+            labels = list(category_totals.keys())
+            values = list(category_totals.values())
+            ax2.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
+            ax2.set_title("Расходы по категориям")
+        else:
+            ax2.text(0.5, 0.5, "Нет данных по категориям", ha="center", va="center")
+
+        fig2.tight_layout()
+        graph_widget2 = FigureCanvasKivyAgg(fig2)
+        graph_widget2.size_hint_y = None
+        graph_widget2.height = 400
+        box.add_widget(graph_widget2)
+
+    def aggregate_by_day(self, records):
+        totals = {}
+        for r in records:
+            date_str = r.get("date")
+            amount = float(r.get("amount", 0))
+            if not date_str:
+                continue
+            try:
+                date = datetime.strptime(date_str, "%d.%m.%Y %H:%M")
+                key = date.strftime("%d.%m")
+            except ValueError:
+                key = "неизв."
+            totals[key] = totals.get(key, 0) + amount
+        return totals
+
+    def aggregate_by_category(self, expenses):
+        totals = {}
+        for e in expenses:
+            cat = e.get("category", "Без категории")
+            amount = float(e.get("amount", 0))
+            totals[cat] = totals.get(cat, 0) + amount
+        return totals
 
 # ---------------------------
 # ScreenManager
@@ -959,11 +1035,26 @@ FinanceManager:
                 size: self.size
 
         StyledLabel:
-            text: "Экран статистики"
+            text: "Статистика"
             font_size: 22
+            size_hint_y: None
+            height: 40
+
+        ScrollView:
+            do_scroll_x: False
+            do_scroll_y: True
+            GridLayout:
+                id: stats_box
+                cols: 1
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: 30
+                padding: 10
 
         StyledButton:
             text: "Назад"
+            size_hint_y: None
+            height: 48
             background_color: rgba("#95A5A6")
             on_release: app.root.current = "menu"
 """
