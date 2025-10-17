@@ -80,9 +80,12 @@ def add_wallet(name, currency, balance):
 
 
 def delete_wallet(name):
-    """Удаляет кошелёк по имени."""
+    """Удаляет кошелёк по имени и записи связанные с ним"""
     global data
     data["wallets"] = [wallet for wallet in data.get("wallets", []) if wallet["name"] != name]
+    data["incomes"] = [incomes for incomes in data.get("incomes") if incomes["wallet"] != name]
+    data["expenses"] = [expenses for expenses in data.get("expenses") if expenses["wallet"] != name]
+
     save_data(data)
 
 
@@ -111,7 +114,6 @@ class WalletScreen(Screen):
     def on_pre_enter(self):
         """Обновляет список кошельков и дату курсов при открытии экрана."""
         self.update_wallet_list()
-        # 🟩 добавь вот эту строку:
         self.ids.last_update_label.text = f"Курсы обновлены: {data.get('last_rates_update', 'неизвестно')}"
 
 
@@ -247,7 +249,7 @@ class WalletScreen(Screen):
         """Показывает диалог подтверждения удаления кошелька."""
         self.delete_name = name
         box = BoxLayout(orientation="vertical", padding=10, spacing=10)
-        box.add_widget(Label(text=f"Удалить кошелёк '{name}'?"))
+        box.add_widget(Label(text=f"Удалить кошелёк '{name}' и все его записи?"))
         btn_layout = BoxLayout(size_hint_y=None, height=48, spacing=10)
         yes = Button(text="Да")
         no = Button(text="Нет")
@@ -256,6 +258,7 @@ class WalletScreen(Screen):
         btn_layout.add_widget(yes)
         btn_layout.add_widget(no)
         box.add_widget(btn_layout)
+
         self.delete_popup = Popup(title="Подтверждение", content=box, size_hint=(0.6, 0.4))
         self.delete_popup.open()
 
@@ -296,11 +299,9 @@ class ExpenseScreen(Screen):
         """Показывает форму для добавления записей"""
         from kivy.uix.spinner import Spinner
 
-        self.CURRENCY_LABELS = {
-            "RUB": "Рубль (RUB)",
-            "USD": "Доллар (USD)",
-            "EUR": "Евро (EUR)"
-        }
+        # Список названий кошельков и категорий
+        wallet_names = [w.get("name") for w in data.get("wallets", [])]
+        category_names = data.get("categories", []) or []
 
         box = BoxLayout(orientation="vertical", spacing=10, padding=10)
 
@@ -308,22 +309,28 @@ class ExpenseScreen(Screen):
         self.action_spinner = Spinner(
             text="Выберите действие",
             values=["Добавить расход", "Добавить доход"],
-            size_hint_y=None,
-            height=44
+            size_hint_y=None, height=44
         )
         box.add_widget(self.action_spinner)
 
-        # Выпадающий список валют
-        self.wallet_currency_spinner = Spinner(
-            text="Выберите валюту",
-            values=list(self.CURRENCY_LABELS.values()),
-            size_hint_y=None,
-            height=44
+        # Выбор кошелька
+        self.wallet_spinner = Spinner(
+            text="Выберите кошелёк",
+            values=wallet_names or ["Нет кошельков"],
+            size_hint_y=None, height=44
         )
-        box.add_widget(self.wallet_currency_spinner)
+        box.add_widget(self.wallet_spinner)
+
+        # Выбор категории
+        self.category_spinner = Spinner(
+            text="Выберите категорию",
+            values=category_names or ["Нет категорий"],
+            size_hint_y=None, height=44
+        )
+        box.add_widget(self.category_spinner)
 
         # Поле ввода суммы
-        self.amount_input = TextInput(hint_text="Сумма", multiline=False, input_filter="float")
+        self.amount_input = TextInput(hint_text="Сумма (в валюте кошелька)", multiline=False, input_filter="float")
         box.add_widget(self.amount_input)
 
         # Кнопка сохранения
@@ -332,7 +339,7 @@ class ExpenseScreen(Screen):
         box.add_widget(save_button)
 
         # Окно добавления
-        self.add_wallet_popup = Popup(title="Добавить запись", content=box, size_hint=(0.9, 0.5))
+        self.add_wallet_popup = Popup(title="Добавить запись", content=box, size_hint=(0.9, 0.6))
         self.add_wallet_popup.open()
 
     def update_lists(self):
@@ -358,15 +365,15 @@ class ExpenseScreen(Screen):
             try:
                 amount = float(amt)
             except (TypeError, ValueError):
-                amount = 0.0
+                amount = 0
 
-            rate = rates.get(cur, 1.0)
+            rate = rates.get(cur, 1)
             try:
                 rub_value = amount * float(rate)
             except Exception:
-                rub_value = 0.0
+                rub_value = 0
 
-            txt = f"id: {rid} | {amount} {cur} (≈ {rub_value:.2f} RUB)"
+            txt = f"id: {rid} | {amount} {cur} | кошелёк: {rec.get('wallet', '—')} | категория: {rec.get('category', '—')} (≈ {rub_value:.2f} RUB)"
 
             row = BoxLayout(orientation="horizontal", size_hint_y=None, height=44, spacing=8, padding=[6,6])
 
@@ -384,13 +391,9 @@ class ExpenseScreen(Screen):
     def save_record(self, instance):
         """Сохраняет новую запись"""
         amount_text = (self.amount_input.text or "0").strip()
-        selected_label = self.wallet_currency_spinner.text
-
-        # Определяем валюту из выбранной надписи
-        currency = next((code for code, label in self.CURRENCY_LABELS.items() if label == selected_label), None)
-        if not currency:
-            Popup(title="Ошибка", content=Label(text="Выберите валюту!"), size_hint=(0.6, 0.3)).open()
-            return
+        wallet_name = (self.wallet_spinner.text or "").strip()
+        category_name = (self.category_spinner.text or "").strip()
+        action_text = (self.action_spinner.text or "").lower()
 
         try:
             amount = float(amount_text)
@@ -399,18 +402,57 @@ class ExpenseScreen(Screen):
             return
 
         # Определяем ключ incomes/expenses
-        action_text = (self.action_spinner.text or "").lower()
         if "доход" in action_text:
             key = "incomes"
+            sign = 1
         elif "расход" in action_text:
             key = "expenses"
+            sign = -1
         else:
             Popup(title="Ошибка", content=Label(text="Выберите действие: доход или расход!"), size_hint=(0.6, 0.3)).open()
             return
 
+        # Проверяем кошелёк
+        wallets = data.get("wallets")
+        wallet = next((w for w in wallets if w.get("name") == wallet_name), None)
+        if not wallet:
+            Popup(title="Ошибка", content=Label(text="Выберите кошелёк или создайте новый!"), size_hint=(0.6, 0.3)).open()
+            return
+
+        # Проверяем категорию
+        categories = data.get("categories")
+        category = next((c for c in categories if c == category_name), None)
+        if category is None:
+            Popup(title="Ошибка", content=Label(text="Выберите категорию или создайте новую!"), size_hint=(0.6, 0.3)).open()
+            return
+
+        # Проверка достаточно ли средств при расходе
+        if sign < 0:
+            try:
+                current_bal = float(wallet.get("balance", 0))
+            except (TypeError, ValueError):
+                current_bal = 0
+            if current_bal < amount:
+                Popup(title="Ошибка", content=Label(text="Недостаточно средств в кошельке!"), size_hint=(0.6, 0.3)).open()
+                return
+
         new_id = self.numbering_id(key)
-        record = {"id": new_id, "currency": currency, "amount": amount}
+        record = {
+            "id": new_id,
+            "currency": wallet.get("currency", "RUB"),
+            "amount": amount,
+            "wallet": wallet_name,
+            "category": category_name,
+            "date": datetime.now().strftime("%d.%m.%Y %H:%M")
+        }
         data.setdefault(key, []).append(record)
+
+        # Обновляем баланс кошелька
+        try:
+            wallet["balance"] = float(wallet.get("balance", 0)) + sign * amount
+        except Exception:
+            wallet["balance"] = sign * amount
+
         save_data(data)
 
         try:
@@ -418,7 +460,7 @@ class ExpenseScreen(Screen):
                 self.add_wallet_popup.dismiss()
         except Exception:
             pass
-        
+
         self.update_lists()
 
     def show_list(self, key):
@@ -432,7 +474,7 @@ class ExpenseScreen(Screen):
             return
 
         rates = data.get("currencies", {}) or {}
-        
+
         for rec in records:
             rid = rec.get("id", "")
             cur = rec.get("currency", "")
@@ -442,18 +484,18 @@ class ExpenseScreen(Screen):
             try:
                 amount = float(amt)
             except (TypeError, ValueError):
-                amount = 0.0
+                amount = 0
 
-            rate = rates.get(cur, 1.0)
+            rate = rates.get(cur, 1)
             try:
                 rub_value = amount * float(rate)
             except Exception:
-                rub_value = 0.0
+                rub_value = 0
 
             text = f"id: {rid} | {amount} {cur} (≈ {rub_value:.2f} RUB)"
 
             row = BoxLayout(orientation="horizontal", size_hint_y=None, height=48, spacing=10, padding=[6, 6])
-            
+
             lbl = Label(
                 text=text,
                 size_hint_x=0.8,
@@ -480,7 +522,7 @@ class ExpenseScreen(Screen):
         """Подтверждение удаления записи"""
         self.del_key = key
         self.del_id = rec_id
-        
+
         box = BoxLayout(orientation="vertical", padding=10, spacing=10)
         box.add_widget(Label(text=f"Удалить запись id={rec_id}?"))
         btn_layout = BoxLayout(size_hint_y=None, height=48, spacing=10)
@@ -505,11 +547,34 @@ class ExpenseScreen(Screen):
             return
 
         records = data.get(key) or []
+        # находим запись
+        rec = next((r for r in records if r.get("id") == rid), None)
+        if rec:
+            wallet_name = rec.get("wallet")
+            amount = 0.0
+            try:
+                amount = float(rec.get("amount", 0))
+            except Exception:
+                amount = 0.0
+
+            # Найдём кошелёк и откатим
+            wallet = next((w for w in data.get("wallets", []) if w.get("name") == wallet_name), None)
+            if wallet:
+                try:
+                    # если запись в incomes — откат будет вычитанием, если expenses — прибавлением
+                    if key == "incomes":
+                        wallet["balance"] = float(wallet.get("balance", 0)) - amount
+                    else:
+                        wallet["balance"] = float(wallet.get("balance", 0)) + amount
+                except Exception:
+                    pass
+
+        # Удаляем запись
         new_list = [r for r in records if r.get("id") != rid]
         data[key] = new_list
         save_data(data)
         self.update_lists()
-        
+
         if hasattr(self, "del_popup"):
             self.del_popup.dismiss()
 
@@ -518,7 +583,6 @@ class ExpenseScreen(Screen):
         if hasattr(self, "del_popup"):
             self.del_popup.dismiss()
 
-    # TODO: Можно убрать нумерацию id, т.к id уже не нужен для удаления записи, но пока оставил, возможно будет удобен для конкретики
     @staticmethod
     def numbering_id(key):
         """Нумерация id"""
