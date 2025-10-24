@@ -1,8 +1,8 @@
 {
     "wallets": [],
+    "categories": [],
     "incomes": [],
     "expenses": [],
-    "categories": [],
     "currencies": {},
     "last_rates_update": ""
 }

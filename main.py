@@ -14,6 +14,11 @@ from kivy.uix.button import Button
 from kivy.uix.textinput import TextInput
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.popup import Popup
+from kivy.clock import Clock
+from threading import Thread
+from matplotlib import use
+use("Agg")
+
 
 # ---------------------------
 # Работа с JSON (хранение данных)
@@ -660,20 +665,52 @@ class CategoryScreen(Screen):
             row.add_widget(btn)
             container.add_widget(row)
 
-
 class StatsScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.status_load = False
+
     def on_pre_enter(self):
-        self.update_charts()
+        if self.status_load:
+            self.update_charts()
+
+    def start_preload(self):
+        """Запускаем загрузку в потоке"""
+        Thread(target=self.preload_charts, daemon=True).start()
+
+    def preload_charts(self):
+        """Берем данные для предзагрузки"""
+        try:
+            self.fig1, self.ax1 = plt.subplots(figsize=(6, 3))
+            self.fig2, self.ax2 = plt.subplots(figsize=(4, 4))
+
+            self.status_load = True
+            Clock.schedule_once(lambda test: self.update_charts())
+
+        except Exception as e:
+            print("Ошибка загрузки графиков:", e)
 
     def update_charts(self):
+
         box = self.ids.stats_box
         box.clear_widgets()
+
+        self.ax1.clear()
+        self.ax2.clear()
 
         incomes = data.get("incomes", [])
         expenses = data.get("expenses", [])
 
         # --- ЛИНЕЙНЫЙ ГРАФИК ---
-        fig1, ax1 = plt.subplots(figsize=(6, 3))
+
+        # ------------------------------------------------------------------
+        # TODO: Если буду какието проблемы с графиками, то расскоментируем
+        # fig1, ax1 = plt.subplots(figsize=(6, 3))
+
+        # TODO: А это комментируем
+        fig1, ax1 = self.fig1, self.ax1
+        # ------------------------------------------------------------------
+
         incomes_by_day = self.aggregate_by_day(incomes)
         expenses_by_day = self.aggregate_by_day(expenses)
 
@@ -699,7 +736,15 @@ class StatsScreen(Screen):
         box.add_widget(graph_widget1)
 
         # --- КРУГОВАЯ ДИАГРАММА ---
-        fig2, ax2 = plt.subplots(figsize=(4, 4))
+
+        # ------------------------------------------------------------------
+        # TODO: Если буду какието проблемы с графиками, то расскоментируем
+        # fig2, ax2 = plt.subplots(figsize=(4, 4))
+        
+        # TODO: А это комментируем
+        fig2, ax2 = self.fig2, self.ax2
+        # ------------------------------------------------------------------
+
         category_totals = self.aggregate_by_category(expenses)
 
         if category_totals:
@@ -739,6 +784,7 @@ class StatsScreen(Screen):
             totals[cat] = totals.get(cat, 0) + amount
         return totals
 
+
 # ---------------------------
 # ScreenManager
 # ---------------------------
@@ -754,22 +800,22 @@ kv = """
 
 <StyledButton@Button>:
     size_hint_y: None
-    height: 45
+    height: 56       # было 45
     background_normal: ""
     background_color: rgba("#4d6fa3")
     color: 1, 1, 1, 1
-    font_size: 16
+    font_size: 20    # было 16
     bold: True
 
 <StyledLabel@Label>:
-    font_size: 20
+    font_size: 22    # было 20
     color: 0, 0, 0, 1
 
 <TextInput>:
     background_color: 1, 1, 1, 1
     foreground_color: 0, 0, 0, 1
     padding: [10, 10]
-    font_size: 16
+    font_size: 18    # было 16
 
 FinanceManager:
     MainMenu:
@@ -1072,12 +1118,19 @@ class FinanceApp(App):
         else:
             # Попробуем тихо обновить курсы (если есть интернет)
             try:
-                update_exchange_rates()
+                Thread(target=update_exchange_rates).start()
                 print("Курсы валют успешно обновлены при запуске.")
             except Exception as e:
                 print("Не удалось обновить курсы при запуске:", e)
 
         return Builder.load_string(kv)
+
+    def on_start(self):
+        try:
+            stasts = self.root.get_screen("stats")
+            stasts.start_preload()
+        except Exception as e:
+            print("Не удалось сделать пердзагрузку статистики:", e)
 
 if __name__ == "__main__":
     FinanceApp().run()
