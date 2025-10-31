@@ -17,6 +17,9 @@ from kivy.uix.popup import Popup
 from kivy.clock import Clock
 from threading import Thread
 from matplotlib import use
+from docx import Document
+from docx.shared import Inches
+
 use("Agg")
 
 
@@ -740,7 +743,7 @@ class StatsScreen(Screen):
         # ------------------------------------------------------------------
         # TODO: Если буду какието проблемы с графиками, то расскоментируем
         # fig2, ax2 = plt.subplots(figsize=(4, 4))
-        
+
         # TODO: А это комментируем
         fig2, ax2 = self.fig2, self.ax2
         # ------------------------------------------------------------------
@@ -783,6 +786,96 @@ class StatsScreen(Screen):
             amount = float(e.get("amount", 0))
             totals[cat] = totals.get(cat, 0) + amount
         return totals
+
+def generate_report(data):
+    """Создаёт финансовый отчёт и сохраняет его в .docx"""
+    try:
+        import os
+        from datetime import datetime
+        import matplotlib.pyplot as plt
+        from docx import Document
+        from docx.shared import Inches
+
+        # Создание документа
+        doc = Document()
+        doc.add_heading('Финансовый отчёт', level=0)
+        doc.add_paragraph(f"Дата генерации: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+        doc.add_paragraph(' ')
+
+        # --- Кошельки ---
+        doc.add_heading('Кошельки', level=1)
+        table = doc.add_table(rows=1, cols=3)
+        table.style = "Table Grid"  # Добавляем видимые границы
+        hdr = table.rows[0].cells
+        hdr[0].text = 'Имя'
+        hdr[1].text = 'Валюта'
+        hdr[2].text = 'Баланс'
+        for w in data.get('wallets', []):
+            row = table.add_row().cells
+            row[0].text = str(w.get('name', ''))
+            row[1].text = str(w.get('currency', ''))
+            row[2].text = str(w.get('balance', ''))
+        doc.add_paragraph(' ')
+
+        # --- Доходы и расходы ---
+        doc.add_heading('Доходы и расходы', level=1)
+        table = doc.add_table(rows=1, cols=5)
+        table.style = "Table Grid"  # Добавляем границы
+        hdr = table.rows[0].cells
+        hdr[0].text = 'ID'
+        hdr[1].text = 'Тип'
+        hdr[2].text = 'Категория'
+        hdr[3].text = 'Сумма'
+        hdr[4].text = 'Дата'
+
+        for r in data.get('incomes', []):
+            row = table.add_row().cells
+            row[0].text = str(r.get('id', ''))
+            row[1].text = 'Доход'
+            row[2].text = str(r.get('category', ''))
+            row[3].text = f"{r.get('amount', 0)} {r.get('currency', '')}"
+            row[4].text = r.get('date', '')
+
+        for r in data.get('expenses', []):
+            row = table.add_row().cells
+            row[0].text = str(r.get('id', ''))
+            row[1].text = 'Расход'
+            row[2].text = str(r.get('category', ''))
+            row[3].text = f"{r.get('amount', 0)} {r.get('currency', '')}"
+            row[4].text = r.get('date', '')
+
+        # --- Итоги ---
+        total_in = sum(float(r.get('amount', 0)) for r in data.get('incomes', []))
+        total_out = sum(float(r.get('amount', 0)) for r in data.get('expenses', []))
+        balance = total_in - total_out
+        doc.add_paragraph(f"\nИтого доходов: {total_in:.2f}")
+        doc.add_paragraph(f"Итого расходов: {total_out:.2f}")
+        doc.add_paragraph(f"Чистый результат: {balance:.2f}")
+
+        # --- Диаграмма ---
+        chart_path = "chart.png"
+        plt.figure(figsize=(4, 4))
+        plt.pie([total_in, total_out], labels=['Доходы', 'Расходы'], autopct='%1.1f%%', startangle=90)
+        plt.title("Соотношение доходов и расходов")
+        plt.savefig(chart_path)
+
+        # Вставляем картинку, если создалась успешно
+        if os.path.exists(chart_path):
+            doc.add_picture(chart_path, width=Inches(4))
+            # После вставки удаляем PNG
+            try:
+                os.remove(chart_path)
+            except Exception as e:
+                print("Не удалось удалить временный файл:", e)
+
+        # --- Сохранение ---
+        filename = f"financial_report_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
+        doc.save(filename)
+        return filename
+
+    except Exception as e:
+        print("Ошибка при создании отчёта:", e)
+        return None
 
 
 # ---------------------------
@@ -1098,6 +1191,10 @@ FinanceManager:
                 padding: 10
 
         StyledButton:
+            text: "Сформировать отчёт (.docx)"
+            on_release: app.generate_report_action()
+
+        StyledButton:
             text: "Назад"
             size_hint_y: None
             height: 48
@@ -1131,6 +1228,18 @@ class FinanceApp(App):
             stasts.start_preload()
         except Exception as e:
             print("Не удалось сделать пердзагрузку статистики:", e)
+
+    def generate_report_action(self):
+        """Вызывается при нажатии кнопки 'Сформировать отчёт'"""
+        filename = generate_report(data)
+        if filename:
+            Popup(title="Отчёт создан",
+                  content=Label(text=f"Файл сохранён: {filename}"),
+                  size_hint=(0.7, 0.4)).open()
+        else:
+            Popup(title="Ошибка",
+                  content=Label(text="Не удалось создать отчёт."),
+                  size_hint=(0.6, 0.3)).open()
 
 if __name__ == "__main__":
     FinanceApp().run()
