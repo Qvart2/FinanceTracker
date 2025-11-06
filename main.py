@@ -39,7 +39,8 @@ def load_data():
             "wallets": [],
             "incomes": [],
             "expenses": [],
-            "categories": []
+            "categories": [],
+            "deleted_records": []
         }
 
 
@@ -77,6 +78,37 @@ def update_exchange_rates():
 # Глобальные данные, загружаем один раз при старте
 data = load_data()
 
+def move_to_trash(key, rec_id):
+    """Перемещает запись в корзину"""
+    records = data.get(key) or []
+    rec = next((r for r in records if r.get("id") == rec_id), None)
+    if rec:
+        # Добавляем метку времени удаления
+        rec["deleted_at"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        data["deleted_records"].append(rec)
+        # Удаляем из исходного списка
+        new_list = [r for r in records if r.get("id") != rec_id]
+        data[key] = new_list
+        save_data(data)
+
+def restore_from_trash(rec_id):
+    """Восстановление записи из корзины"""
+    trash = data.get("deleted_records") or []
+    rec = next((r for r in trash if r.get("id") == rec_id), None)
+    if rec:
+        key = "incomes" if rec.get("amount", 0) >= 0 else "expenses"
+        data.setdefault(key, []).append(rec)
+        # Удаляем из корзины
+        new_trash = [r for r in trash if r.get("id") != rec_id]
+        data["deleted_records"] = new_trash
+        save_data(data)
+
+def permanently_delete_from_trash(rec_id):
+    """Полное удаление записи в корзине"""
+    trash = data.get("deleted_records") or []
+    new_trash = [r for r in trash if r.get("id") != rec_id]
+    data["deleted_records"] = new_trash
+    save_data(data)
 
 # ---------------------------
 # Доп. функции для кошельков (из main1.py)
@@ -548,7 +580,7 @@ class ExpenseScreen(Screen):
         self.del_popup.open()
 
     def delete_record_confirmed(self, instance):
-        """Удаление записи"""
+        """Переносит запись в корзину"""
         key = getattr(self, "del_key", None)
         rid = getattr(self, "del_id", None)
         if key is None or rid is None:
@@ -556,37 +588,44 @@ class ExpenseScreen(Screen):
                 self.del_popup.dismiss()
             return
 
-        records = data.get(key) or []
-        # находим запись
-        rec = next((r for r in records if r.get("id") == rid), None)
-        if rec:
-            wallet_name = rec.get("wallet")
-            amount = 0.0
-            try:
-                amount = float(rec.get("amount", 0))
-            except Exception:
-                amount = 0.0
-
-            # Найдём кошелёк и откатим
-            wallet = next((w for w in data.get("wallets", []) if w.get("name") == wallet_name), None)
-            if wallet:
-                try:
-                    # если запись в incomes — откат будет вычитанием, если expenses — прибавлением
-                    if key == "incomes":
-                        wallet["balance"] = float(wallet.get("balance", 0)) - amount
-                    else:
-                        wallet["balance"] = float(wallet.get("balance", 0)) + amount
-                except Exception:
-                    pass
-
-        # Удаляем запись
-        new_list = [r for r in records if r.get("id") != rid]
-        data[key] = new_list
-        save_data(data)
+        # Переносим в корзину
+        move_to_trash(key, rid)
         self.update_lists()
 
         if hasattr(self, "del_popup"):
             self.del_popup.dismiss()
+
+            records = data.get(key) or []
+            # находим запись
+            rec = next((r for r in records if r.get("id") == rid), None)
+            if rec:
+                wallet_name = rec.get("wallet")
+                amount = 0.0
+                try:
+                    amount = float(rec.get("amount", 0))
+                except Exception:
+                    amount = 0.0
+
+                # Найдём кошелёк и откатим
+                wallet = next((w for w in data.get("wallets", []) if w.get("name") == wallet_name), None)
+                if wallet:
+                    try:
+                        # если запись в incomes — откат будет вычитанием, если expenses — прибавлением
+                        if key == "incomes":
+                            wallet["balance"] = float(wallet.get("balance", 0)) - amount
+                        else:
+                            wallet["balance"] = float(wallet.get("balance", 0)) + amount
+                    except Exception:
+                        pass
+
+            # Удаляем запись
+            new_list = [r for r in records if r.get("id") != rid]
+            data[key] = new_list
+            save_data(data)
+            self.update_lists()
+
+            if hasattr(self, "del_popup"):
+                self.del_popup.dismiss()
 
     def delete_record_canceled(self, instance):
         """Отмена удаления."""
@@ -877,6 +916,86 @@ def generate_report(data):
         print("Ошибка при создании отчёта:", e)
         return None
 
+class TrashScreen(Screen):
+    def on_pre_enter(self):
+        """Обновляет список удалённых записей"""
+        self.update_trash_list()
+
+    def update_trash_list(self):
+        """Заполняет контейнер записями из корзины"""
+        container = self.ids.trash_list
+        container.clear_widgets()
+        trash = data.get("deleted_records", [])
+
+        if not trash:
+            container.add_widget(Label(text="Корзина пуста", size_hint_y=None, height=40, color=(0, 0, 0, 1)))
+            return
+
+        rates = data.get("currencies", {}) or {}
+
+        for rec in trash:
+            rid = rec.get("id", "")
+            cur = rec.get("currency", "")
+            amt = rec.get("amount", "")
+            deleted_at = rec.get("deleted_at", "")
+
+            try:
+                amount = float(amt)
+            except (TypeError, ValueError):
+                amount = 0
+
+            rate = rates.get(cur, 1)
+            try:
+                rub_value = amount * float(rate)
+            except Exception:
+                rub_value = 0
+
+            text = f"id: {rid} | {amount} {cur} (≈ {rub_value:.2f} RUB) | Удалено: {deleted_at}"
+
+            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=48, spacing=10, padding=[6, 6])
+
+            lbl = Label(
+                text=text,
+                size_hint_x=0.6,
+                halign="left",
+                valign="middle",
+                color=(0, 0, 0, 1),
+                text_size=(None, None)
+            )
+            lbl.bind(size=lambda instance, value: setattr(instance, "text_size", (instance.width, None)))
+
+            restore_btn = Button(
+                text="Восстановить",
+                size_hint_x=0.2,
+                background_normal="",
+                background_color=(0.2, 0.7, 0.2, 1),
+                color=(1, 1, 1, 1)
+            )
+            restore_btn.bind(on_release=lambda btn, r=rid: self.restore_record(r))
+
+            delete_btn = Button(
+                text="Удалить навсегда",
+                size_hint_x=0.2,
+                background_normal="",
+                background_color=(0.8, 0.2, 0.2, 1),
+                color=(1, 1, 1, 1)
+            )
+            delete_btn.bind(on_release=lambda btn, r=rid: self.permanently_delete_record(r))
+
+            row.add_widget(lbl)
+            row.add_widget(restore_btn)
+            row.add_widget(delete_btn)
+            container.add_widget(row)
+
+    def restore_record(self, rec_id):
+        """Восстанавливает запись"""
+        restore_from_trash(rec_id)
+        self.update_trash_list()
+
+    def permanently_delete_record(self, rec_id):
+        """Окончательно удаляет запись"""
+        permanently_delete_from_trash(rec_id)
+        self.update_trash_list()
 
 # ---------------------------
 # ScreenManager
@@ -886,7 +1005,7 @@ class FinanceManager(ScreenManager):
 
 
 # ---------------------------
-# KV-разметка (из main.py, с добавленным WalletScreen контентом)
+# KV-разметка
 # ---------------------------
 kv = """
 #:import rgba kivy.utils.get_color_from_hex
@@ -916,6 +1035,7 @@ FinanceManager:
     ExpenseScreen:
     CategoryScreen:
     StatsScreen:
+    TrashScreen:
 
 <MainMenu>:
     name: "menu"
@@ -950,6 +1070,10 @@ FinanceManager:
         StyledButton:
             text: "Статистика"
             on_release: app.root.current = "stats"
+
+        StyledButton:
+            text: "Корзина"
+            on_release: app.root.current = "trash"
 
         StyledButton:
             text: "Выход"
@@ -1200,6 +1324,47 @@ FinanceManager:
             height: 48
             background_color: rgba("#95A5A6")
             on_release: app.root.current = "menu"
+
+<TrashScreen>:
+    name: "trash"
+    BoxLayout:
+        orientation: "vertical"
+        spacing: 10
+        padding: 20
+        canvas.before:
+            Color:
+                rgba: rgba("#F0F0F0")
+            Rectangle:
+                pos: self.pos
+                size: self.size
+
+        StyledLabel:
+            text: "Корзина удалённых записей"
+            font_size: 22
+            size_hint_y: None
+            height: 40
+
+        ScrollView:
+            do_scroll_x: False
+            do_scroll_y: True
+
+            BoxLayout:
+                id: trash_list
+                orientation: "vertical"
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: 5
+                padding: 5
+
+        BoxLayout:
+            size_hint_y: None
+            height: 48
+            spacing: 10
+
+            StyledButton:
+                text: "Назад"
+                background_color: rgba("#95A5A6")
+                on_release: app.root.current = "menu"
 """
 
 
