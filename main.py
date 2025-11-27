@@ -83,8 +83,9 @@ def move_to_trash(key, rec_id):
     records = data.get(key) or []
     rec = next((r for r in records if r.get("id") == rec_id), None)
     if rec:
-        # Добавляем метку времени удаления
+        # Добавляем метку времени и тип записи
         rec["deleted_at"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        rec["record_type"] = key
         data["deleted_records"].append(rec)
         # Удаляем из исходного списка
         new_list = [r for r in records if r.get("id") != rec_id]
@@ -96,9 +97,8 @@ def restore_from_trash(rec_id):
     trash = data.get("deleted_records") or []
     rec = next((r for r in trash if r.get("id") == rec_id), None)
     if rec:
-        key = "incomes" if rec.get("amount", 0) >= 0 else "expenses"
+        key = rec["record_type"]
         data.setdefault(key, []).append(rec)
-        # Удаляем из корзины
         new_trash = [r for r in trash if r.get("id") != rec_id]
         data["deleted_records"] = new_trash
         save_data(data)
@@ -106,7 +106,9 @@ def restore_from_trash(rec_id):
 def permanently_delete_from_trash(rec_id):
     """Полное удаление записи в корзине"""
     trash = data.get("deleted_records") or []
+    print(f"Текущие записи в корзине: {[r.get('id') for r in trash]}")
     new_trash = [r for r in trash if r.get("id") != rec_id]
+    print(f"После удаления {rec_id}: {[r.get('id') for r in new_trash]}")
     data["deleted_records"] = new_trash
     save_data(data)
 
