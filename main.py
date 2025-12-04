@@ -15,13 +15,22 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.popup import Popup
 from kivy.clock import Clock
+from kivy.core.window import Window
+from kivy.utils import platform
 from threading import Thread
 from matplotlib import use
-from docx import Document
-from docx.shared import Inches
+import shutil
+import logging
+from kivy.uix.recycleview import RecycleView
+from kivy.uix.recycleboxlayout import RecycleBoxLayout
+from kivy.uix.recycleview.views import RecycleDataViewBehavior
+from kivy.properties import BooleanProperty, StringProperty, NumericProperty, ObjectProperty
+from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
+from kivy.metrics import dp, sp
 
 use("Agg")
 
+logging.basicConfig(level=logging.ERROR)
 
 # ---------------------------
 # Работа с JSON (хранение данных)
@@ -32,8 +41,18 @@ DATA_FILE = "data.json"
 def load_data():
     """Загрузка данных из файла JSON"""
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            logging.error("Поврежденный JSON файл, возвращаем дефолтные данные")
+            return {
+                "wallets": [],
+                "incomes": [],
+                "expenses": [],
+                "categories": [],
+                "deleted_records": []
+            }
     else:
         return {
             "wallets": [],
@@ -45,15 +64,15 @@ def load_data():
 
 
 def save_data(data):
-    """Сохранение данных в файл JSON"""
+    """Сохранение данных в файл JSON с бэкапом"""
+    if os.path.exists(DATA_FILE):
+        shutil.copy(DATA_FILE, DATA_FILE + ".bak")
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-from datetime import datetime
 
-def update_exchange_rates():
+def update_exchange_rates(show_popup=False):
     """Загружает курсы валют с сайта ЦБ РФ и сохраняет их в data."""
-    global data
     url = "https://www.cbr.ru/scripts/XML_daily.asp"
     try:
         response = requests.get(url, timeout=10)
@@ -67,76 +86,108 @@ def update_exchange_rates():
             nominal = int(valute.find("Nominal").text)
             rates[code] = rate / nominal
 
-        data["currencies"] = rates
-        data["last_rates_update"] = datetime.now().strftime("%d.%m.%Y %H:%M")
-        save_data(data)
+        app = App.get_running_app()
+        app.data["currencies"] = rates
+        app.data["last_rates_update"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+        save_data(app.data)
+        if show_popup:
+            popup = Popup(title="Успешно", content=Label(text="Курсы валют обновлены!"), size_hint=(0.6, 0.3))
+            popup.open()
         return True
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Ошибка сети при обновлении курсов: {e}")
+        if show_popup:
+            popup = Popup(title="Ошибка", content=Label(text="Не удалось обновить курсы (проверьте интернет)."), size_hint=(0.6, 0.3))
+            popup.open()
+        return False
     except Exception as e:
-        print("Ошибка при обновлении курсов:", e)
+        logging.error(f"Ошибка при обновлении курсов: {e}")
+        if show_popup:
+            popup = Popup(title="Ошибка", content=Label(text="Не удалось обновить курсы."), size_hint=(0.6, 0.3))
+            popup.open()
         return False
 
-# Глобальные данные, загружаем один раз при старте
-data = load_data()
 
 def move_to_trash(key, rec_id):
-    """Перемещает запись в корзину"""
-    records = data.get(key) or []
+    """Перемещает запись в корзину и корректирует баланс кошелька"""
+    app = App.get_running_app()
+    records = app.data.get(key) or []
     rec = next((r for r in records if r.get("id") == rec_id), None)
     if rec:
+        # Корректируем баланс
+        wallet_name = rec.get("wallet")
+        amount = float(rec.get("amount", 0))
+        sign = -1 if key == "incomes" else 1  # Для доходов вычитаем, для расходов прибавляем
+        wallet = next((w for w in app.data.get("wallets", []) if w.get("name") == wallet_name), None)
+        if wallet:
+            wallet["balance"] = float(wallet.get("balance", 0)) + sign * amount
+
         # Добавляем метку времени и тип записи
         rec["deleted_at"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         rec["record_type"] = key
-        data["deleted_records"].append(rec)
+        app.data["deleted_records"].append(rec)
         # Удаляем из исходного списка
-        new_list = [r for r in records if r.get("id") != rec_id]
-        data[key] = new_list
-        save_data(data)
+        app.data[key] = [r for r in records if r.get("id") != rec_id]
+        save_data(app.data)
+
 
 def restore_from_trash(rec_id):
-    """Восстановление записи из корзины"""
-    trash = data.get("deleted_records") or []
+    """Восстановление записи из корзины и корректировка баланса"""
+    app = App.get_running_app()
+    trash = app.data.get("deleted_records") or []
     rec = next((r for r in trash if r.get("id") == rec_id), None)
     if rec:
         key = rec["record_type"]
-        data.setdefault(key, []).append(rec)
-        new_trash = [r for r in trash if r.get("id") != rec_id]
-        data["deleted_records"] = new_trash
-        save_data(data)
+        # Корректируем баланс обратно
+        wallet_name = rec.get("wallet")
+        amount = float(rec.get("amount", 0))
+        sign = 1 if key == "incomes" else -1  # Для доходов прибавляем, для расходов вычитаем
+        wallet = next((w for w in app.data.get("wallets", []) if w.get("name") == wallet_name), None)
+        if wallet:
+            wallet["balance"] = float(wallet.get("balance", 0)) + sign * amount
+
+        app.data.setdefault(key, []).append(rec)
+        app.data["deleted_records"] = [r for r in trash if r.get("id") != rec_id]
+        save_data(app.data)
+
 
 def permanently_delete_from_trash(rec_id):
     """Полное удаление записи в корзине"""
-    trash = data.get("deleted_records") or []
-    print(f"Текущие записи в корзине: {[r.get('id') for r in trash]}")
-    new_trash = [r for r in trash if r.get("id") != rec_id]
-    print(f"После удаления {rec_id}: {[r.get('id') for r in new_trash]}")
-    data["deleted_records"] = new_trash
-    save_data(data)
+    app = App.get_running_app()
+    trash = app.data.get("deleted_records") or []
+    app.data["deleted_records"] = [r for r in trash if r.get("id") != rec_id]
+    save_data(app.data)
+
 
 # ---------------------------
-# Доп. функции для кошельков (из main1.py)
+# Доп. функции для кошельков
 # ---------------------------
 def add_wallet(name, currency, balance):
     """Добавляет новый кошелёк в данные и сохраняет их."""
-    global data
+    app = App.get_running_app()
     wallet = {"name": name, "currency": currency, "balance": balance}
-    data.setdefault("wallets", []).append(wallet)
-    save_data(data)
+    app.data.setdefault("wallets", []).append(wallet)
+    save_data(app.data)
 
 
 def delete_wallet(name):
-    """Удаляет кошелёк по имени и записи связанные с ним"""
-    global data
-    data["wallets"] = [wallet for wallet in data.get("wallets", []) if wallet["name"] != name]
-    data["incomes"] = [incomes for incomes in data.get("incomes") if incomes["wallet"] != name]
-    data["expenses"] = [expenses for expenses in data.get("expenses") if expenses["wallet"] != name]
-
-    save_data(data)
+    """Удаляет кошелёк по имени и перемещает связанные записи в корзину"""
+    app = App.get_running_app()
+    # Переместить связанные записи в корзину
+    for key in ["incomes", "expenses"]:
+        records = [r for r in app.data.get(key, []) if r["wallet"] == name]
+        for rec in records:
+            move_to_trash(key, rec["id"])
+    # Удалить кошелек
+    app.data["wallets"] = [wallet for wallet in app.data.get("wallets", []) if wallet["name"] != name]
+    save_data(app.data)
 
 
 def calculate_total_balance():
     """Подсчитывает итоговый баланс по всем кошелькам."""
+    app = App.get_running_app()
     total_balance = {}
-    for wallet in data.get("wallets", []):
+    for wallet in app.data.get("wallets", []):
         currency = wallet.get("currency")
         balance = wallet.get("balance", 0)
         try:
@@ -158,125 +209,93 @@ class WalletScreen(Screen):
     def on_pre_enter(self):
         """Обновляет список кошельков и дату курсов при открытии экрана."""
         self.update_wallet_list()
-        self.ids.last_update_label.text = f"Курсы обновлены: {data.get('last_rates_update', 'неизвестно')}"
-
+        app = App.get_running_app()
+        self.ids.last_update_label.text = f"Курсы обновлены: {app.data.get('last_rates_update', 'неизвестно')}"
 
     def update_rates(self):
         """Обновляет курсы валют с сайта ЦБ РФ."""
-        if update_exchange_rates():
-            popup = Popup(title="Успешно", content=Label(text="Курсы валют обновлены!"), size_hint=(0.6, 0.3))
-            popup.open()
-        else:
-            popup = Popup(title="Ошибка", content=Label(text="Не удалось обновить курсы."), size_hint=(0.6, 0.3))
-            popup.open()
-
-        self.ids.last_update_label.text = f"Курсы обновлены: {data.get('last_rates_update', 'неизвестно')}"
+        update_exchange_rates(show_popup=True)
+        app = App.get_running_app()
+        self.ids.last_update_label.text = f"Курсы обновлены: {app.data.get('last_rates_update', 'неизвестно')}"
 
     def update_wallet_list(self):
         """Обновляет список кошельков на экране."""
-        container = self.ids.wallet_list
-        container.clear_widgets()
-
-        if not data.get("wallets"):
-            container.add_widget(Label(text="Список кошельков пуст.", font_size="16sp", color=(0, 0, 0, 1)))
-        else:
-            for wallet in data["wallets"]:
-                # Пропускаем некорректные записи
-                if not all(k in wallet for k in ("name", "currency", "balance")):
-                    continue
-
-                # Вычисляем курс и рублёвое значение
-                rate = data.get("currencies", {}).get(wallet["currency"], 1)
-                try:
-                    rub_value = float(wallet["balance"]) * rate
-                except (TypeError, ValueError):
-                    rub_value = 0.0
-
-                # Формируем строку текста
-                text = f"Имя: {wallet['name']}, Баланс: {wallet['balance']} {wallet['currency']} (≈ {rub_value:.2f} RUB)"
-
-                # Элементы интерфейса
-                wallet_layout = BoxLayout(orientation="horizontal", size_hint_y=None, height=40, spacing=10, padding=[6, 6])
-                wallet_label = Label(
-                    text=text,
-                    size_hint_x=0.8,
-                    halign="left",
-                    valign="middle",
-                    color=(0, 0, 0, 1)
-                )
-                wallet_label.bind(size=lambda lbl, _: setattr(lbl, "text_size", (lbl.width, None)))
-
-                delete_button = Button(
-                    text="Удалить",
-                    size_hint_x=0.2,
-                    background_normal="",
-                    background_color=(0.8, 0.2, 0.2, 1),
-                    color=(1, 1, 1, 1),
-                    on_release=lambda btn, name=wallet["name"]: self.confirm_delete_wallet(name)
-                )
-
-                wallet_layout.add_widget(wallet_label)
-                wallet_layout.add_widget(delete_button)
-                container.add_widget(wallet_layout)
-
-
+        app = App.get_running_app()
+        rates = app.data.get("currencies", {})
+        data_list = []
+        for wallet in app.data.get("wallets", []):
+            if not all(k in wallet for k in ("name", "currency", "balance")):
+                continue
+            rate = rates.get(wallet["currency"], 1)
+            try:
+                rub_value = float(wallet["balance"]) * rate
+            except (TypeError, ValueError):
+                rub_value = 0.0
+            text = f"Имя: {wallet['name']}, Баланс: {wallet['balance']} {wallet['currency']} (≈ {rub_value:.2f} RUB)"
+            data_list.append({'text': text, 'name': wallet['name']})
+        self.ids.wallet_rv.data = data_list
 
     def show_add_wallet_form(self, *args):
         """Показывает форму для добавления кошелька."""
         from kivy.uix.spinner import Spinner
 
-        # Список валют: отображаем красиво, сохраняем код
-        self.CURRENCY_LABELS = {
-            "RUB": "Рубль (RUB)",
-            "USD": "Доллар (USD)",
-            "EUR": "Евро (EUR)"
-        }
-
         box = BoxLayout(orientation="vertical", spacing=10, padding=10)
-
-        # Поле для имени кошелька
         self.wallet_name_input = TextInput(hint_text="Имя кошелька", multiline=False)
         box.add_widget(self.wallet_name_input)
 
-        # Выпадающий список валют
+        currencies = ["RUB", "USD", "EUR"]
+
         self.wallet_currency_spinner = Spinner(
             text="Выберите валюту",
-            values=list(self.CURRENCY_LABELS.values()),
+            values=currencies,
             size_hint_y=None,
-            height=44
+            height=dp(50)
         )
         box.add_widget(self.wallet_currency_spinner)
 
-        # Поле для баланса
-        self.wallet_balance_input = TextInput(hint_text="Баланс", multiline=False, input_filter="float")
+        # Баланс
+        self.wallet_balance_input = TextInput(
+            hint_text="Баланс",
+            multiline=False,
+            input_filter="float"
+        )
         box.add_widget(self.wallet_balance_input)
 
-        # Кнопка сохранения
-        save_button = Button(text="Сохранить", size_hint_y=None, height=44)
+        # Кнопка "Сохранить" (нормальной толщины)
+        save_button = Button(
+            text="Сохранить",
+            size_hint_y=None,
+            height=dp(50),
+            background_normal="",
+            background_color=(0.3, 0.5, 0.9, 1),
+            color=(1, 1, 1, 1),
+            font_size=sp(18)
+        )
         save_button.bind(on_release=self.save_wallet)
         box.add_widget(save_button)
 
-        # Окно добавления
-        self.add_wallet_popup = Popup(title="Добавить кошелёк", content=box, size_hint=(0.9, 0.6))
+        self.add_wallet_popup = Popup(
+            title="Добавить кошелёк",
+            content=box,
+            size_hint=(0.9, 0.6)
+        )
         self.add_wallet_popup.open()
+
 
     def save_wallet(self, instance):
         """Сохраняет новый кошелёк и обновляет список."""
+
         name = (self.wallet_name_input.text or "").strip()
         balance_text = (self.wallet_balance_input.text or "0").strip()
-        selected_label = self.wallet_currency_spinner.text
+        currency = self.wallet_currency_spinner.text
 
-        # Определяем код валюты из выбранной надписи
-        currency = None
-        for code, label in self.CURRENCY_LABELS.items():
-            if label == selected_label:
-                currency = code
-                break
-
-        # Проверки
-        if not name or not currency:
-            error_popup = Popup(title="Ошибка", content=Label(text="Введите имя и выберите валюту!"), size_hint=(0.6, 0.3))
-            error_popup.open()
+        # Проверка выбора валюты
+        if not name or currency == "Выберите валюту":
+            Popup(
+                title="Ошибка",
+                content=Label(text="Введите имя и выберите валюту!"),
+                size_hint=(0.6, 0.3)
+            ).open()
             return
 
         try:
@@ -284,9 +303,13 @@ class WalletScreen(Screen):
             add_wallet(name, currency, balance)
             self.update_wallet_list()
             self.add_wallet_popup.dismiss()
+
         except ValueError:
-            error_popup = Popup(title="Ошибка", content=Label(text="Неверный формат баланса!"), size_hint=(0.6, 0.3))
-            error_popup.open()
+            Popup(
+                title="Ошибка",
+                content=Label(text="Неверный формат баланса!"),
+                size_hint=(0.6, 0.3)
+            ).open()
 
 
     def confirm_delete_wallet(self, name):
@@ -331,106 +354,132 @@ class WalletScreen(Screen):
         popup.open()
 
 
+class WalletRow(RecycleDataViewBehavior, BoxLayout):
+    """Viewclass for wallet RecycleView"""
+    text = StringProperty()
+    name = StringProperty()
+    index = None
+
+    def refresh_view_attrs(self, rv, index, data):
+        self.index = index
+        super(WalletRow, self).refresh_view_attrs(rv, index, data)
+
+
 class ExpenseScreen(Screen):
     """
-    Экран добаления доходов и расходов
+    Экран добавления доходов и расходов
     """
     def on_pre_enter(self):
         """Обновляет списки доходов и расходов"""
         self.update_lists()
 
     def show_add_ExpenseIncome_form(self, *args):
-        """Показывает форму для добавления записей"""
+        """Показывает форму для добавления дохода или расхода"""
         from kivy.uix.spinner import Spinner
+        from kivy.metrics import dp, sp
 
-        # Список названий кошельков и категорий
-        wallet_names = [w.get("name") for w in data.get("wallets", [])]
-        category_names = data.get("categories", []) or []
+        app = App.get_running_app()
+        wallet_names = [w.get("name") for w in app.data.get("wallets", [])]
+        category_names = app.data.get("categories", []) or []
 
-        box = BoxLayout(orientation="vertical", spacing=10, padding=10)
+        box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(12))
 
-        # Выпадающий список для выбора действия доход/расход
+        # --- Тип действия ---
         self.action_spinner = Spinner(
             text="Выберите действие",
-            values=["Добавить расход", "Добавить доход"],
-            size_hint_y=None, height=44
+            values=["Добавить доход", "Добавить расход"],
+            size_hint_y=None,
+            height=dp(50),
+            font_size=sp(18)
         )
         box.add_widget(self.action_spinner)
 
-        # Выбор кошелька
+        # --- Выбор кошелька ---
         self.wallet_spinner = Spinner(
             text="Выберите кошелёк",
             values=wallet_names or ["Нет кошельков"],
-            size_hint_y=None, height=44
+            size_hint_y=None,
+            height=dp(50),
+            font_size=sp(18)
         )
         box.add_widget(self.wallet_spinner)
 
-        # Выбор категории
+        # --- Выбор категории ---
         self.category_spinner = Spinner(
             text="Выберите категорию",
             values=category_names or ["Нет категорий"],
-            size_hint_y=None, height=44
+            size_hint_y=None,
+            height=dp(50),
+            font_size=sp(18)
         )
         box.add_widget(self.category_spinner)
 
-        # Поле ввода суммы
-        self.amount_input = TextInput(hint_text="Сумма (в валюте кошелька)", multiline=False, input_filter="float")
+        # --- Сумма ---
+        self.amount_input = TextInput(
+            hint_text="Сумма (в валюте кошелька)",
+            multiline=False,
+            input_filter="float",
+            size_hint_y=None,
+            height=dp(50),
+            font_size=sp(18),
+            padding=[dp(10), dp(10)]
+        )
         box.add_widget(self.amount_input)
 
-        # Кнопка сохранения
-        save_button = Button(text="Сохранить", size_hint_y=None, height=44)
+        # --- Кнопка Сохранить ---
+        save_button = Button(
+            text="Сохранить",
+            size_hint_y=None,
+            height=dp(56),
+            background_normal="",
+            background_color=(0.2, 0.6, 0.9, 1),
+            color=(1, 1, 1, 1),
+            font_size=sp(18),
+            bold=True
+        )
         save_button.bind(on_release=self.save_record)
         box.add_widget(save_button)
 
-        # Окно добавления
-        self.add_wallet_popup = Popup(title="Добавить запись", content=box, size_hint=(0.9, 0.6))
-        self.add_wallet_popup.open()
+        # --- POPUP ---
+        self.add_record_popup = Popup(
+            title="Добавить запись",
+            content=box,
+            size_hint=(0.9, 0.65)
+        )
+        self.add_record_popup.open()
+
 
     def update_lists(self):
         """Обновляем списки"""
-        self.populate_record_list(self.ids.income_list, data.get("incomes", []), "incomes")
-        self.populate_record_list(self.ids.expense_list, data.get("expenses", []), "expenses")
+        app = App.get_running_app()
+        rates = app.data.get("currencies", {})
+        incomes = app.data.get("incomes", [])
+        expenses = app.data.get("expenses", [])
 
-    def populate_record_list(self, container, records, key):
-        """Заполняем контейнер записями"""
-        container.clear_widgets()
-        if not records:
-            container.add_widget(Label(text="Пусто", size_hint_y=None, height=36, color=(0,0,0,1)))
-            return
+        income_data = self.get_record_data(incomes, rates, "incomes")
+        expense_data = self.get_record_data(expenses, rates, "expenses")
 
-        rates = data.get("currencies", {}) or {}
+        self.ids.income_rv.data = income_data
+        self.ids.expense_rv.data = expense_data
 
+    def get_record_data(self, records, rates, key):
+        data_list = []
         for rec in records:
             rid = rec.get("id", "")
             cur = rec.get("currency", "")
-            amt = rec.get("amount", "")
-            txt = f"id: {rid} | {amt} {cur}"
-
+            amt = rec.get("amount", 0)
             try:
                 amount = float(amt)
             except (TypeError, ValueError):
                 amount = 0
-
             rate = rates.get(cur, 1)
             try:
                 rub_value = amount * float(rate)
             except Exception:
                 rub_value = 0
-
-            txt = f"id: {rid} | {amount} {cur} | кошелёк: {rec.get('wallet', '—')} | категория: {rec.get('category', '—')} (≈ {rub_value:.2f} RUB)"
-
-            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=44, spacing=8, padding=[6,6])
-
-            lbl = Label(text=txt, size_hint_x=0.78, halign="left", valign="middle", color=(0,0,0,1))
-            lbl.bind(size=lambda inst, val: setattr(inst, "text_size", (inst.width, None)))
-
-            btn = Button(text="Удалить", size_hint_x=0.22, background_normal="", background_color=(0.8,0.2,0.2,1), color=(1,1,1,1))
-            btn.bind(on_release=lambda b, k=key, r=rid: self.confirm_delete_record(k, r))
-
-            row.add_widget(lbl)
-            row.add_widget(btn)
-            container.add_widget(row)
-
+            text = f"id: {rid} | {amount} {cur} | кошелёк: {rec.get('wallet', '—')} | категория: {rec.get('category', '—')} (≈ {rub_value:.2f} RUB)"
+            data_list.append({'text': text, 'rid': rid, 'key': key})
+        return data_list
 
     def save_record(self, instance):
         """Сохраняет новую запись"""
@@ -441,11 +490,13 @@ class ExpenseScreen(Screen):
 
         try:
             amount = float(amount_text)
+            if amount <= 0:
+                Popup(title="Ошибка", content=Label(text="Сумма должна быть положительной!"), size_hint=(0.6, 0.3)).open()
+                return
         except ValueError:
             Popup(title="Ошибка", content=Label(text="Неверный формат суммы!"), size_hint=(0.6, 0.3)).open()
             return
 
-        # Определяем ключ incomes/expenses
         if "доход" in action_text:
             key = "incomes"
             sign = 1
@@ -456,26 +507,20 @@ class ExpenseScreen(Screen):
             Popup(title="Ошибка", content=Label(text="Выберите действие: доход или расход!"), size_hint=(0.6, 0.3)).open()
             return
 
-        # Проверяем кошелёк
-        wallets = data.get("wallets")
+        app = App.get_running_app()
+        wallets = app.data.get("wallets")
         wallet = next((w for w in wallets if w.get("name") == wallet_name), None)
         if not wallet:
             Popup(title="Ошибка", content=Label(text="Выберите кошелёк или создайте новый!"), size_hint=(0.6, 0.3)).open()
             return
 
-        # Проверяем категорию
-        categories = data.get("categories")
-        category = next((c for c in categories if c == category_name), None)
-        if category is None:
+        categories = app.data.get("categories")
+        if category_name not in categories:
             Popup(title="Ошибка", content=Label(text="Выберите категорию или создайте новую!"), size_hint=(0.6, 0.3)).open()
             return
 
-        # Проверка достаточно ли средств при расходе
         if sign < 0:
-            try:
-                current_bal = float(wallet.get("balance", 0))
-            except (TypeError, ValueError):
-                current_bal = 0
+            current_bal = float(wallet.get("balance", 0))
             if current_bal < amount:
                 Popup(title="Ошибка", content=Label(text="Недостаточно средств в кошельке!"), size_hint=(0.6, 0.3)).open()
                 return
@@ -489,78 +534,13 @@ class ExpenseScreen(Screen):
             "category": category_name,
             "date": datetime.now().strftime("%d.%m.%Y %H:%M")
         }
-        data.setdefault(key, []).append(record)
+        app.data.setdefault(key, []).append(record)
 
-        # Обновляем баланс кошелька
-        try:
-            wallet["balance"] = float(wallet.get("balance", 0)) + sign * amount
-        except Exception:
-            wallet["balance"] = sign * amount
+        wallet["balance"] = float(wallet.get("balance", 0)) + sign * amount
 
-        save_data(data)
-
-        try:
-            if hasattr(self, "add_wallet_popup"):
-                self.add_wallet_popup.dismiss()
-        except Exception:
-            pass
-
+        save_data(app.data)
+        self.add_record_popup.dismiss()
         self.update_lists()
-
-    def show_list(self, key):
-        """Показывает список записей"""
-        container = self.ids.rec_list
-        container.clear_widgets()
-
-        records = data.get(key) or []
-        if not records:
-            container.add_widget(Label(text="Список пустой", size_hint_y=None, height=40, color=(0, 0, 0, 1)))
-            return
-
-        rates = data.get("currencies", {}) or {}
-
-        for rec in records:
-            rid = rec.get("id", "")
-            cur = rec.get("currency", "")
-            amt = rec.get("amount", "")
-            text = f"id: {rid} | {amt} {cur}"
-
-            try:
-                amount = float(amt)
-            except (TypeError, ValueError):
-                amount = 0
-
-            rate = rates.get(cur, 1)
-            try:
-                rub_value = amount * float(rate)
-            except Exception:
-                rub_value = 0
-
-            text = f"id: {rid} | {amount} {cur} (≈ {rub_value:.2f} RUB)"
-
-            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=48, spacing=10, padding=[6, 6])
-
-            lbl = Label(
-                text=text,
-                size_hint_x=0.8,
-                halign="left",
-                valign="middle",
-                color=(0, 0, 0, 1)
-            )
-            lbl.bind(size=lambda instance, value: setattr(instance, "text_size", (instance.width, None)))
-
-            delete_button = Button(
-                text="Удалить",
-                size_hint_x=0.2,
-                background_normal="",
-                background_color=(0.8, 0.2, 0.2, 1),
-                color=(1, 1, 1, 1)
-            )
-            delete_button.bind(on_release=lambda btn, k=key, r=rid: self.confirm_delete_record(k, r))
-
-            row.add_widget(lbl)
-            row.add_widget(delete_button)
-            container.add_widget(row)
 
     def confirm_delete_record(self, key, rec_id):
         """Подтверждение удаления записи"""
@@ -583,70 +563,43 @@ class ExpenseScreen(Screen):
 
     def delete_record_confirmed(self, instance):
         """Переносит запись в корзину"""
-        key = getattr(self, "del_key", None)
-        rid = getattr(self, "del_id", None)
-        if key is None or rid is None:
-            if hasattr(self, "del_popup"):
-                self.del_popup.dismiss()
-            return
-
-        # Переносим в корзину
+        key = self.del_key
+        rid = self.del_id
         move_to_trash(key, rid)
         self.update_lists()
-
-        if hasattr(self, "del_popup"):
-            self.del_popup.dismiss()
-
-            records = data.get(key) or []
-            # находим запись
-            rec = next((r for r in records if r.get("id") == rid), None)
-            if rec:
-                wallet_name = rec.get("wallet")
-                amount = 0.0
-                try:
-                    amount = float(rec.get("amount", 0))
-                except Exception:
-                    amount = 0.0
-
-                # Найдём кошелёк и откатим
-                wallet = next((w for w in data.get("wallets", []) if w.get("name") == wallet_name), None)
-                if wallet:
-                    try:
-                        # если запись в incomes — откат будет вычитанием, если expenses — прибавлением
-                        if key == "incomes":
-                            wallet["balance"] = float(wallet.get("balance", 0)) - amount
-                        else:
-                            wallet["balance"] = float(wallet.get("balance", 0)) + amount
-                    except Exception:
-                        pass
-
-            # Удаляем запись
-            new_list = [r for r in records if r.get("id") != rid]
-            data[key] = new_list
-            save_data(data)
-            self.update_lists()
-
-            if hasattr(self, "del_popup"):
-                self.del_popup.dismiss()
+        self.del_popup.dismiss()
 
     def delete_record_canceled(self, instance):
         """Отмена удаления."""
-        if hasattr(self, "del_popup"):
-            self.del_popup.dismiss()
+        self.del_popup.dismiss()
 
     @staticmethod
     def numbering_id(key):
         """Нумерация id"""
-        rec = data.get(key) or []
-        try:
-            existing = set(int(item.get("id", 0)) for item in rec if isinstance(item, dict) and "id" in item)
-        except Exception:
-            existing = set()
-
+        app = App.get_running_app()
+        rec = app.data.get(key) or []
+        existing = set()
+        for item in rec:
+            try:
+                existing.add(int(item.get("id", 0)))
+            except ValueError:
+                pass
         new_id = 1
         while new_id in existing:
             new_id += 1
         return new_id
+
+
+class RecordRow(RecycleDataViewBehavior, BoxLayout):
+    """Viewclass for record RecycleView"""
+    text = StringProperty()
+    rid = NumericProperty()
+    key = StringProperty()
+    index = None
+
+    def refresh_view_attrs(self, rv, index, data):
+        self.index = index
+        super(RecordRow, self).refresh_view_attrs(rv, index, data)
 
 
 class CategoryScreen(Screen):
@@ -657,62 +610,44 @@ class CategoryScreen(Screen):
         name = (name or "").strip()
         if not name:
             return
-        if name not in data["categories"]:
-            data["categories"].append(name)
-            save_data(data)
+        app = App.get_running_app()
+        if name not in app.data["categories"]:
+            app.data["categories"].append(name)
+            save_data(app.data)
             self.update_category_list()
 
     def remove_category(self, name):
-        if name in data["categories"]:
-            data["categories"].remove(name)
-            save_data(data)
+        app = App.get_running_app()
+        if name in app.data["categories"]:
+            app.data["categories"].remove(name)
+            save_data(app.data)
             self.update_category_list()
 
     def update_category_list(self):
-        container = self.ids.category_list
-        container.clear_widgets()
+        app = App.get_running_app()
+        data_list = []
+        for cat in app.data["categories"]:
+            data_list.append({'text': cat})
+        self.ids.category_rv.data = data_list
 
-        for cat in data["categories"]:
-            row = BoxLayout(
-                orientation="horizontal",
-                size_hint_y=None,
-                height=48,
-                spacing=10,
-                padding=[6, 6]
-            )
 
-            # Лейбл категории
-            lbl = Label(
-                text=cat,
-                halign="left",
-                valign="middle",
-                size_hint_x=1,
-                color=(0, 0, 0, 1),
-                font_size=16
-            )
-            lbl.bind(
-                size=lambda instance, value: setattr(instance, "text_size", (instance.width, None))
-            )
+class CategoryRow(RecycleDataViewBehavior, BoxLayout):
+    """Viewclass for category RecycleView"""
+    text = StringProperty()
+    index = None
 
-            btn = Button(
-                text="X",
-                size_hint=(None, None),
-                size=(36, 36),
-                font_size=18,
-                background_normal="",
-                background_color=(0.85, 0.2, 0.2, 1),
-                color=(1, 1, 1, 1)
-            )
-            btn.bind(on_release=lambda widget, c=cat: self.remove_category(c))
+    def refresh_view_attrs(self, rv, index, data):
+        self.index = index
+        super(CategoryRow, self).refresh_view_attrs(rv, index, data)
 
-            row.add_widget(lbl)
-            row.add_widget(btn)
-            container.add_widget(row)
 
 class StatsScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.status_load = False
+        self.cached_incomes_by_day = None
+        self.cached_expenses_by_day = None
+        self.cached_category_totals = None
 
     def on_pre_enter(self):
         if self.status_load:
@@ -729,12 +664,20 @@ class StatsScreen(Screen):
             self.fig2, self.ax2 = plt.subplots(figsize=(4, 4))
 
             self.status_load = True
-            Clock.schedule_once(lambda test: self.update_charts())
-
+            Clock.schedule_once(lambda dt: self.update_charts())
         except Exception as e:
-            print("Ошибка загрузки графиков:", e)
+            logging.error(f"Ошибка загрузки графиков: {e}")
 
     def update_charts(self):
+        app = App.get_running_app()
+        incomes = app.data.get("incomes", [])
+        expenses = app.data.get("expenses", [])
+
+        # Кэшируем если изменилось
+        if self.cached_incomes_by_day is None:
+            self.cached_incomes_by_day = self.aggregate_by_day(incomes)
+            self.cached_expenses_by_day = self.aggregate_by_day(expenses)
+            self.cached_category_totals = self.aggregate_by_category(expenses)
 
         box = self.ids.stats_box
         box.clear_widgets()
@@ -742,65 +685,37 @@ class StatsScreen(Screen):
         self.ax1.clear()
         self.ax2.clear()
 
-        incomes = data.get("incomes", [])
-        expenses = data.get("expenses", [])
-
-        # --- ЛИНЕЙНЫЙ ГРАФИК ---
-
-        # ------------------------------------------------------------------
-        # TODO: Если буду какието проблемы с графиками, то расскоментируем
-        # fig1, ax1 = plt.subplots(figsize=(6, 3))
-
-        # TODO: А это комментируем
-        fig1, ax1 = self.fig1, self.ax1
-        # ------------------------------------------------------------------
-
-        incomes_by_day = self.aggregate_by_day(incomes)
-        expenses_by_day = self.aggregate_by_day(expenses)
-
-        days = sorted(set(incomes_by_day.keys()) | set(expenses_by_day.keys()))
-        income_values = [incomes_by_day.get(d, 0) for d in days]
-        expense_values = [expenses_by_day.get(d, 0) for d in days]
+        days = sorted(set(self.cached_incomes_by_day.keys()) | set(self.cached_expenses_by_day.keys()))
+        income_values = [self.cached_incomes_by_day.get(d, 0) for d in days]
+        expense_values = [self.cached_expenses_by_day.get(d, 0) for d in days]
 
         if days:
-            ax1.plot(days, income_values, label="Доходы", linewidth=2, marker="o", color="green")
-            ax1.plot(days, expense_values, label="Расходы", linewidth=2, marker="o", color="red")
-            ax1.set_title("Доходы и расходы по датам")
-            ax1.set_xlabel("Дата")
-            ax1.set_ylabel("Сумма")
-            ax1.legend()
-            ax1.grid(True)
+            self.ax1.plot(days, income_values, label="Доходы", linewidth=2, marker="o", color="green")
+            self.ax1.plot(days, expense_values, label="Расходы", linewidth=2, marker="o", color="red")
+            self.ax1.set_title("Доходы и расходы по датам")
+            self.ax1.set_xlabel("Дата")
+            self.ax1.set_ylabel("Сумма")
+            self.ax1.legend()
+            self.ax1.grid(True)
         else:
-            ax1.text(0.5, 0.5, "Нет данных для отображения", ha="center", va="center")
+            self.ax1.text(0.5, 0.5, "Нет данных для отображения", ha="center", va="center")
 
-        fig1.tight_layout()
-        graph_widget1 = FigureCanvasKivyAgg(fig1)
+        self.fig1.tight_layout()
+        graph_widget1 = FigureCanvasKivyAgg(self.fig1)
         graph_widget1.size_hint_y = None
         graph_widget1.height = 400
         box.add_widget(graph_widget1)
 
-        # --- КРУГОВАЯ ДИАГРАММА ---
-
-        # ------------------------------------------------------------------
-        # TODO: Если буду какието проблемы с графиками, то расскоментируем
-        # fig2, ax2 = plt.subplots(figsize=(4, 4))
-
-        # TODO: А это комментируем
-        fig2, ax2 = self.fig2, self.ax2
-        # ------------------------------------------------------------------
-
-        category_totals = self.aggregate_by_category(expenses)
-
-        if category_totals:
-            labels = list(category_totals.keys())
-            values = list(category_totals.values())
-            ax2.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
-            ax2.set_title("Расходы по категориям")
+        if self.cached_category_totals:
+            labels = list(self.cached_category_totals.keys())
+            values = list(self.cached_category_totals.values())
+            self.ax2.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
+            self.ax2.set_title("Расходы по категориям")
         else:
-            ax2.text(0.5, 0.5, "Нет данных по категориям", ha="center", va="center")
+            self.ax2.text(0.5, 0.5, "Нет данных по категориям", ha="center", va="center")
 
-        fig2.tight_layout()
-        graph_widget2 = FigureCanvasKivyAgg(fig2)
+        self.fig2.tight_layout()
+        graph_widget2 = FigureCanvasKivyAgg(self.fig2)
         graph_widget2.size_hint_y = None
         graph_widget2.height = 400
         box.add_widget(graph_widget2)
@@ -817,6 +732,7 @@ class StatsScreen(Screen):
                 key = date.strftime("%d.%m")
             except ValueError:
                 key = "неизв."
+                continue
             totals[key] = totals.get(key, 0) + amount
         return totals
 
@@ -828,95 +744,86 @@ class StatsScreen(Screen):
             totals[cat] = totals.get(cat, 0) + amount
         return totals
 
+
 def generate_report(data):
-    """Создаёт финансовый отчёт и сохраняет его в .docx"""
+    import os
+    import shutil
+    from datetime import datetime
+    from kivy.app import App
+    from kivy.utils import platform
+
     try:
-        import os
-        from datetime import datetime
-        import matplotlib.pyplot as plt
-        from docx import Document
-        from docx.shared import Inches
+        app = App.get_running_app()
+        if app:
+            base_dir = app.user_data_dir
+        else:
+            base_dir = os.getcwd()
 
-        # Создание документа
-        doc = Document()
-        doc.add_heading('Финансовый отчёт', level=0)
-        doc.add_paragraph(f"Дата генерации: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
-        doc.add_paragraph(' ')
+        os.makedirs(base_dir, exist_ok=True)
 
-        # --- Кошельки ---
-        doc.add_heading('Кошельки', level=1)
-        table = doc.add_table(rows=1, cols=3)
-        table.style = "Table Grid"  # Добавляем видимые границы
-        hdr = table.rows[0].cells
-        hdr[0].text = 'Имя'
-        hdr[1].text = 'Валюта'
-        hdr[2].text = 'Баланс'
-        for w in data.get('wallets', []):
-            row = table.add_row().cells
-            row[0].text = str(w.get('name', ''))
-            row[1].text = str(w.get('currency', ''))
-            row[2].text = str(w.get('balance', ''))
-        doc.add_paragraph(' ')
+        lines = []
+        lines.append("Финансовый отчёт")
+        lines.append(f"Дата генерации: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+        lines.append("")
 
-        # --- Доходы и расходы ---
-        doc.add_heading('Доходы и расходы', level=1)
-        table = doc.add_table(rows=1, cols=5)
-        table.style = "Table Grid"  # Добавляем границы
-        hdr = table.rows[0].cells
-        hdr[0].text = 'ID'
-        hdr[1].text = 'Тип'
-        hdr[2].text = 'Категория'
-        hdr[3].text = 'Сумма'
-        hdr[4].text = 'Дата'
+        lines.append("Кошельки:")
+        for w in data.get("wallets", []):
+            lines.append(f"- {w.get('name','')} : {w.get('balance',0)} {w.get('currency','')}")
+        lines.append("")
 
-        for r in data.get('incomes', []):
-            row = table.add_row().cells
-            row[0].text = str(r.get('id', ''))
-            row[1].text = 'Доход'
-            row[2].text = str(r.get('category', ''))
-            row[3].text = f"{r.get('amount', 0)} {r.get('currency', '')}"
-            row[4].text = r.get('date', '')
+        lines.append("Доходы:")
+        for r in data.get("incomes", []):
+            lines.append(f"- id:{r.get('id','')} | {r.get('amount',0)} {r.get('currency','')} | {r.get('category','')} | {r.get('date','')}")
+        lines.append("")
 
-        for r in data.get('expenses', []):
-            row = table.add_row().cells
-            row[0].text = str(r.get('id', ''))
-            row[1].text = 'Расход'
-            row[2].text = str(r.get('category', ''))
-            row[3].text = f"{r.get('amount', 0)} {r.get('currency', '')}"
-            row[4].text = r.get('date', '')
+        lines.append("Расходы:")
+        for r in data.get("expenses", []):
+            lines.append(f"- id:{r.get('id','')} | {r.get('amount',0)} {r.get('currency','')} | {r.get('category','')} | {r.get('date','')}")
+        lines.append("")
 
-        # --- Итоги ---
         total_in = sum(float(r.get('amount', 0)) for r in data.get('incomes', []))
         total_out = sum(float(r.get('amount', 0)) for r in data.get('expenses', []))
         balance = total_in - total_out
-        doc.add_paragraph(f"\nИтого доходов: {total_in:.2f}")
-        doc.add_paragraph(f"Итого расходов: {total_out:.2f}")
-        doc.add_paragraph(f"Чистый результат: {balance:.2f}")
 
-        # --- Диаграмма ---
-        chart_path = "chart.png"
-        plt.figure(figsize=(4, 4))
-        plt.pie([total_in, total_out], labels=['Доходы', 'Расходы'], autopct='%1.1f%%', startangle=90)
-        plt.title("Соотношение доходов и расходов")
-        plt.savefig(chart_path)
+        lines.append(f"Итого доходов: {total_in:.2f}")
+        lines.append(f"Итого расходов: {total_out:.2f}")
+        lines.append(f"Чистый результат: {balance:.2f}")
+        lines.append("")
 
-        # Вставляем картинку, если создалась успешно
-        if os.path.exists(chart_path):
-            doc.add_picture(chart_path, width=Inches(4))
-            # После вставки удаляем PNG
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+        txt_filename = os.path.join(base_dir, f"financial_report_{timestamp}.txt")
+
+        with open(txt_filename, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        # PNG УДАЛЁН НАВСЕГДА — больше не создаётся и не возвращается
+
+        downloads_path = None
+        if platform == "android":
             try:
-                os.remove(chart_path)
+                downloads_dir = "/storage/emulated/0/Download"
+                if os.path.exists(downloads_dir):
+                    downloads_path = os.path.join(
+                        downloads_dir,
+                        f"financial_report_{timestamp}.txt"
+                    )
+                    shutil.copy(txt_filename, downloads_path)
             except Exception as e:
-                print("Не удалось удалить временный файл:", e)
+                logging.error(f"Не удалось сохранить в папку Downloads: {e}")
 
-        # --- Сохранение ---
-        filename = f"financial_report_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
-        doc.save(filename)
-        return filename
+        # Возвращаем только текстовый файл
+        return {
+            "internal": txt_filename,
+            "downloads": downloads_path
+            # "chart" — больше не возвращаем!
+        }
 
     except Exception as e:
-        print("Ошибка при создании отчёта:", e)
+        import traceback
+        traceback.print_exc()
+        logging.error(f"Ошибка при создании отчёта: {e}")
         return None
+
 
 class TrashScreen(Screen):
     def on_pre_enter(self):
@@ -925,79 +832,72 @@ class TrashScreen(Screen):
 
     def update_trash_list(self):
         """Заполняет контейнер записями из корзины"""
-        container = self.ids.trash_list
-        container.clear_widgets()
-        trash = data.get("deleted_records", [])
-
-        if not trash:
-            container.add_widget(Label(text="Корзина пуста", size_hint_y=None, height=40, color=(0, 0, 0, 1)))
-            return
-
-        rates = data.get("currencies", {}) or {}
-
+        app = App.get_running_app()
+        trash = app.data.get("deleted_records", [])
+        rates = app.data.get("currencies", {})
+        data_list = []
         for rec in trash:
             rid = rec.get("id", "")
             cur = rec.get("currency", "")
-            amt = rec.get("amount", "")
+            amt = rec.get("amount", 0)
             deleted_at = rec.get("deleted_at", "")
-
             try:
                 amount = float(amt)
             except (TypeError, ValueError):
                 amount = 0
-
             rate = rates.get(cur, 1)
             try:
                 rub_value = amount * float(rate)
             except Exception:
                 rub_value = 0
-
             text = f"id: {rid} | {amount} {cur} (≈ {rub_value:.2f} RUB) | Удалено: {deleted_at}"
-
-            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=48, spacing=10, padding=[6, 6])
-
-            lbl = Label(
-                text=text,
-                size_hint_x=0.6,
-                halign="left",
-                valign="middle",
-                color=(0, 0, 0, 1),
-                text_size=(None, None)
-            )
-            lbl.bind(size=lambda instance, value: setattr(instance, "text_size", (instance.width, None)))
-
-            restore_btn = Button(
-                text="Восстановить",
-                size_hint_x=0.2,
-                background_normal="",
-                background_color=(0.2, 0.7, 0.2, 1),
-                color=(1, 1, 1, 1)
-            )
-            restore_btn.bind(on_release=lambda btn, r=rid: self.restore_record(r))
-
-            delete_btn = Button(
-                text="Удалить навсегда",
-                size_hint_x=0.2,
-                background_normal="",
-                background_color=(0.8, 0.2, 0.2, 1),
-                color=(1, 1, 1, 1)
-            )
-            delete_btn.bind(on_release=lambda btn, r=rid: self.permanently_delete_record(r))
-
-            row.add_widget(lbl)
-            row.add_widget(restore_btn)
-            row.add_widget(delete_btn)
-            container.add_widget(row)
+            data_list.append({'text': text, 'rid': rid})
+        self.ids.trash_rv.data = data_list
 
     def restore_record(self, rec_id):
         """Восстанавливает запись"""
         restore_from_trash(rec_id)
         self.update_trash_list()
 
-    def permanently_delete_record(self, rec_id):
+    def confirm_permanently_delete_record(self, rec_id):
+        """Подтверждение окончательного удаления"""
+        self.del_id = rec_id
+
+        box = BoxLayout(orientation="vertical", padding=10, spacing=10)
+        box.add_widget(Label(text=f"Удалить навсегда запись id={rec_id}?"))
+        btn_layout = BoxLayout(size_hint_y=None, height=48, spacing=10)
+        yes = Button(text="Да")
+        no = Button(text="Нет")
+        yes.bind(on_release=self.permanently_delete_confirmed)
+        no.bind(on_release=self.permanently_delete_canceled)
+        btn_layout.add_widget(yes)
+        btn_layout.add_widget(no)
+        box.add_widget(btn_layout)
+
+        self.del_popup = Popup(title="Подтверждение удаления", content=box, size_hint=(0.6, 0.4))
+        self.del_popup.open()
+
+    def permanently_delete_confirmed(self, instance):
         """Окончательно удаляет запись"""
-        permanently_delete_from_trash(rec_id)
+        permanently_delete_from_trash(self.del_id)
         self.update_trash_list()
+        self.del_popup.dismiss()
+
+    def permanently_delete_canceled(self, instance):
+        """Отмена удаления."""
+        self.del_popup.dismiss()
+
+
+class TrashRow(RecycleDataViewBehavior, BoxLayout):
+    """Viewclass for trash RecycleView"""
+    text = StringProperty()
+    rid = NumericProperty()
+    index = None
+
+    def refresh_view_attrs(self, rv, index, data):
+        self.index = index
+        super(TrashRow, self).refresh_view_attrs(rv, index, data)
+
 
 # ---------------------------
 # ScreenManager
@@ -1011,25 +911,176 @@ class FinanceManager(ScreenManager):
 # ---------------------------
 kv = """
 #:import rgba kivy.utils.get_color_from_hex
+#:import dp kivy.metrics.dp
+#:import sp kivy.metrics.sp
+
+<RecycleView>:
+    do_scroll_x: False
+    do_scroll_y: True
+    bar_width: 0
+    scroll_type: ['bars', 'content']
+    canvas.before:
+        Color:
+            rgba: rgba("#F0F0F0")
+        Rectangle:
+            pos: self.pos
+            size: self.size
+
+<RecycleBoxLayout>:
+    default_size: None, dp(56)
+    default_size_hint: 1, None
+    size_hint_y: None
+    height: self.minimum_height
+    orientation: 'vertical'
+    spacing: dp(2)
+    padding: dp(5)
+    canvas.before:
+        Color:
+            rgba: rgba("#F0F0F0")
+        Rectangle:
+            pos: self.pos
+            size: self.size
+
+<WalletRow>, <RecordRow>, <CategoryRow>, <TrashRow>:
+    canvas.before:
+        Color:
+            rgba: rgba("#F0F0F0")
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    Label:
+        color: 0, 0, 0, 1
+        text_size: self.size
+        halign: "left"
+        valign: "middle"
+        padding: [dp(10), dp(5)]
+    Button:
+        color: 1, 1, 1, 1
+        font_size: sp(15)
 
 <StyledButton@Button>:
     size_hint_y: None
-    height: 56       # было 45
+    height: dp(56)
     background_normal: ""
     background_color: rgba("#4d6fa3")
     color: 1, 1, 1, 1
-    font_size: 20    # было 16
+    font_size: sp(20)
     bold: True
 
 <StyledLabel@Label>:
-    font_size: 22    # было 20
+    font_size: sp(22)
     color: 0, 0, 0, 1
 
 <TextInput>:
     background_color: 1, 1, 1, 1
     foreground_color: 0, 0, 0, 1
-    padding: [10, 10]
-    font_size: 18    # было 16
+    padding: [dp(10), dp(10)]
+    font_size: sp(18)
+
+<WalletRow>:
+    orientation: "horizontal"
+    size_hint_y: None
+    height: dp(80)
+    spacing: dp(10)
+    padding: [dp(6), dp(6)]
+
+    Label:
+        text: root.text
+        size_hint_x: 0.8
+        size_hint_y: None
+        halign: "left"
+        valign: "middle"
+        color: (0, 0, 0, 1)
+
+        text_size: self.width, None
+
+    Button:
+        text: "Удалить"
+        size_hint_x: 0.2
+        background_normal: ""
+        background_color: (0.8, 0.2, 0.2, 1)
+        color: (1, 1, 1, 1)
+        on_release: app.root.get_screen('wallets').confirm_delete_wallet(root.name)
+
+<RecordRow>:
+    orientation: "horizontal"
+    size_hint_y: None
+    height: dp(44)
+    spacing: dp(8)
+    padding: [dp(6), dp(6)]
+
+    Label:
+        text: root.text
+        size_hint_x: 0.78
+        halign: "left"
+        valign: "middle"
+        color: (0, 0, 0, 1)
+        text_size: self.size
+
+    Button:
+        text: "Удалить"
+        size_hint_x: 0.22
+        background_normal: ""
+        background_color: (0.8,0.2,0.2,1)
+        color: (1,1,1,1)
+        on_release: app.root.get_screen('expenses').confirm_delete_record(root.key, root.rid)
+
+<CategoryRow>:
+    orientation: "horizontal"
+    size_hint_y: None
+    height: dp(48)
+    spacing: dp(10)
+    padding: [dp(6), dp(6)]
+
+    Label:
+        text: root.text
+        halign: "left"
+        valign: "middle"
+        size_hint_x: 1
+        color: (0, 0, 0, 1)
+        font_size: sp(16)
+        text_size: self.size
+
+    Button:
+        text: "X"
+        size_hint: (None, None)
+        size: (dp(36), dp(36))
+        font_size: sp(18)
+        background_normal: ""
+        background_color: (0.85, 0.2, 0.2, 1)
+        color: (1, 1, 1, 1)
+        on_release: app.root.get_screen('categories').remove_category(root.text)
+
+<TrashRow>:
+    orientation: "horizontal"
+    size_hint_y: None
+    height: dp(48)
+    spacing: dp(10)
+    padding: [dp(6), dp(6)]
+
+    Label:
+        text: root.text
+        size_hint_x: 0.6
+        halign: "left"
+        valign: "middle"
+        color: (0, 0, 0, 1)
+        text_size: self.size
+
+    Button:
+        text: "Восстановить"
+        size_hint_x: 0.2
+        background_normal: ""
+        background_color: (0.2, 0.7, 0.2, 1)
+        color: (1, 1, 1, 1)
+        on_release: app.root.get_screen('trash').restore_record(root.rid)
+
+    Button:
+        text: "Удалить навсегда"
+        size_hint_x: 0.2
+        background_normal: ""
+        background_color: (0.8, 0.2, 0.2, 1)
+        color: (1, 1, 1, 1)
+        on_release: app.root.get_screen('trash').confirm_permanently_delete_record(root.rid)
 
 FinanceManager:
     MainMenu:
@@ -1043,8 +1094,8 @@ FinanceManager:
     name: "menu"
     BoxLayout:
         orientation: "vertical"
-        spacing: 15
-        padding: 30
+        spacing: dp(15)
+        padding: dp(30)
         canvas.before:
             Color:
                 rgba: rgba("#F0F0F0")
@@ -1054,7 +1105,7 @@ FinanceManager:
 
         StyledLabel:
             text: "Финансовый менеджер"
-            font_size: 28
+            font_size: sp(28)
             bold: True
 
         StyledButton:
@@ -1086,8 +1137,8 @@ FinanceManager:
     name: "wallets"
     BoxLayout:
         orientation: "vertical"
-        spacing: 10
-        padding: 20
+        spacing: dp(10)
+        padding: dp(20)
         canvas.before:
             Color:
                 rgba: rgba("#F0F0F0")
@@ -1097,64 +1148,76 @@ FinanceManager:
 
         StyledLabel:
             text: "Экран кошельков"
-            font_size: 22
+            font_size: sp(22)
 
         ScrollView:
             do_scroll_x: False
             do_scroll_y: True
 
-            BoxLayout:
-                id: wallet_list
-                orientation: "vertical"
-                size_hint_y: None
-                height: self.minimum_height
-                spacing: 5
-                padding: 5
+            RecycleView:
+                id: wallet_rv
+                viewclass: 'WalletRow'
+                RecycleBoxLayout:
+                    default_size: None, dp(40)
+                    default_size_hint: 1, None
+                    size_hint_y: None
+                    height: self.minimum_height
+                    orientation: 'vertical'
+                    spacing: dp(5)
+                    padding: dp(5)
 
         BoxLayout:
             orientation: "horizontal"
             size_hint_y: None
-            height: 50
-            spacing: 10
+            height: dp(60)
+            spacing: dp(10)
 
             StyledButton:
-                text: "Добавить кошелёк"
+                text: "Добавить"
+                size_hint_x: 1
+                font_size: sp(16)
                 on_release: root.show_add_wallet_form()
 
             StyledButton:
-                text: "Итоговый баланс"
+                text: "Баланс"
+                size_hint_x: 1
+                font_size: sp(16)
                 on_release: root.show_total_balance()
 
             StyledButton:
-                text: "Обновить курсы"
+                text: "Обновить"
+                size_hint_x: 1
+                font_size: sp(16)
                 on_release: root.update_rates()
 
         BoxLayout:
             size_hint_y: None
-            height: 25
-            padding: [5, 0, 5, 0]
+            height: dp(25)
+            padding: [dp(5), 0, dp(5), 0]
 
             Label:
                 id: last_update_label
                 text: "Курсы обновлены: неизвестно"
-                font_size: 13
-                color: 0.4, 0.4, 0.4, 1   # серый текст
+                font_size: sp(13)
+                color: 0.4, 0.4, 0.4, 1
                 halign: "right"
                 valign: "middle"
                 text_size: self.size
 
-
         StyledButton:
             text: "Назад"
             background_color: rgba("#95A5A6")
+            font_size: sp(18)
+            size_hint_y: None
+            height: dp(60)
             on_release: app.root.current = "menu"
 
 <ExpenseScreen>:
     name: "expenses"
     BoxLayout:
         orientation: "vertical"
-        spacing: 10
-        padding: 20
+        spacing: dp(10)
+        padding: dp(20)
         canvas.before:
             Color:
                 rgba: rgba("#F0F0F0")
@@ -1164,74 +1227,65 @@ FinanceManager:
 
         StyledLabel:
             text: "Доходы и расходы"
-            font_size: 22
+            font_size: sp(22)
             size_hint_y: None
-            height: 40
+            height: dp(40)
 
         BoxLayout:
             size_hint_y: None
-            height: "40dp"
-            spacing: 10
+            height: dp(40)
+            spacing: dp(10)
 
             StyledButton:
                 text: "Добавить запись"
                 on_release: root.show_add_ExpenseIncome_form()
 
-        BoxLayout:
-            orientation: "horizontal"
-            spacing: 10
+        TabbedPanel:
+            do_default_tab: False
             size_hint_y: 1
 
-            BoxLayout:
-                orientation: "vertical"
-                size_hint_x: 0.5
-                spacing: 6
-
-                StyledLabel:
-                    text: "Доходы"
-                    font_size: 18
-                    size_hint_y: None
-                    height: 30
+            TabbedPanelItem:
+                text: "Доходы"
 
                 ScrollView:
                     do_scroll_x: False
                     do_scroll_y: True
 
-                    BoxLayout:
-                        id: income_list
-                        orientation: "vertical"
-                        size_hint_y: None
-                        height: self.minimum_height
-                        spacing: 5
-                        padding: 5
+                    RecycleView:
+                        id: income_rv
+                        viewclass: 'RecordRow'
+                        RecycleBoxLayout:
+                            default_size: None, dp(44)
+                            default_size_hint: 1, None
+                            size_hint_y: None
+                            height: self.minimum_height
+                            orientation: 'vertical'
+                            spacing: dp(5)
+                            padding: dp(5)
 
-            BoxLayout:
-                orientation: "vertical"
-                size_hint_x: 0.5
-                spacing: 6
-
-                StyledLabel:
-                    text: "Расходы"
-                    font_size: 18
-                    size_hint_y: None
-                    height: 30
+            TabbedPanelItem:
+                text: "Расходы"
 
                 ScrollView:
                     do_scroll_x: False
                     do_scroll_y: True
 
-                    BoxLayout:
-                        id: expense_list
-                        orientation: "vertical"
-                        size_hint_y: None
-                        height: self.minimum_height
-                        spacing: 5
-                        padding: 5
+                    RecycleView:
+                        id: expense_rv
+                        viewclass: 'RecordRow'
+                        RecycleBoxLayout:
+                            default_size: None, dp(44)
+                            default_size_hint: 1, None
+                            size_hint_y: None
+                            height: self.minimum_height
+                            orientation: 'vertical'
+                            spacing: dp(5)
+                            padding: dp(5)
 
         StyledButton:
             text: "Назад"
             size_hint_y: None
-            height: "48dp"
+            height: dp(48)
             size_hint_x: 1
             background_color: rgba("#95A5A6")
             on_release: app.root.current = "menu"
@@ -1240,8 +1294,8 @@ FinanceManager:
     name: "categories"
     BoxLayout:
         orientation: "vertical"
-        spacing: 10
-        padding: 20
+        spacing: dp(10)
+        padding: dp(20)
         canvas.before:
             Color:
                 rgba: rgba("#F0F0F0")
@@ -1251,13 +1305,13 @@ FinanceManager:
 
         StyledLabel:
             text: "Категории расходов"
-            font_size: 22
+            font_size: sp(22)
 
         TextInput:
             id: category_input
             hint_text: "Введите название категории"
             size_hint_y: None
-            height: 45
+            height: dp(45)
 
         StyledButton:
             text: "Добавить категорию"
@@ -1267,19 +1321,23 @@ FinanceManager:
 
         StyledLabel:
             text: "Список категорий:"
-            font_size: 18
+            font_size: sp(18)
 
         ScrollView:
             do_scroll_x: False
             do_scroll_y: True
 
-            BoxLayout:
-                id: category_list
-                orientation: "vertical"
-                size_hint_y: None
-                height: self.minimum_height
-                spacing: 5
-                padding: 5
+            RecycleView:
+                id: category_rv
+                viewclass: 'CategoryRow'
+                RecycleBoxLayout:
+                    default_size: None, dp(48)
+                    default_size_hint: 1, None
+                    size_hint_y: None
+                    height: self.minimum_height
+                    orientation: 'vertical'
+                    spacing: dp(5)
+                    padding: dp(5)
 
         StyledButton:
             text: "Назад"
@@ -1290,8 +1348,8 @@ FinanceManager:
     name: "stats"
     BoxLayout:
         orientation: "vertical"
-        spacing: 10
-        padding: 20
+        spacing: dp(10)
+        padding: dp(20)
         canvas.before:
             Color:
                 rgba: rgba("#F0F0F0")
@@ -1301,9 +1359,9 @@ FinanceManager:
 
         StyledLabel:
             text: "Статистика"
-            font_size: 22
+            font_size: sp(22)
             size_hint_y: None
-            height: 40
+            height: dp(40)
 
         ScrollView:
             do_scroll_x: False
@@ -1313,17 +1371,17 @@ FinanceManager:
                 cols: 1
                 size_hint_y: None
                 height: self.minimum_height
-                spacing: 30
-                padding: 10
+                spacing: dp(30)
+                padding: dp(10)
 
         StyledButton:
-            text: "Сформировать отчёт (.docx)"
+            text: "Сформировать отчёт"
             on_release: app.generate_report_action()
 
         StyledButton:
             text: "Назад"
             size_hint_y: None
-            height: 48
+            height: dp(48)
             background_color: rgba("#95A5A6")
             on_release: app.root.current = "menu"
 
@@ -1331,8 +1389,8 @@ FinanceManager:
     name: "trash"
     BoxLayout:
         orientation: "vertical"
-        spacing: 10
-        padding: 20
+        spacing: dp(10)
+        padding: dp(20)
         canvas.before:
             Color:
                 rgba: rgba("#F0F0F0")
@@ -1342,26 +1400,30 @@ FinanceManager:
 
         StyledLabel:
             text: "Корзина удалённых записей"
-            font_size: 22
+            font_size: sp(22)
             size_hint_y: None
-            height: 40
+            height: dp(40)
 
         ScrollView:
             do_scroll_x: False
             do_scroll_y: True
 
-            BoxLayout:
-                id: trash_list
-                orientation: "vertical"
-                size_hint_y: None
-                height: self.minimum_height
-                spacing: 5
-                padding: 5
+            RecycleView:
+                id: trash_rv
+                viewclass: 'TrashRow'
+                RecycleBoxLayout:
+                    default_size: None, dp(48)
+                    default_size_hint: 1, None
+                    size_hint_y: None
+                    height: self.minimum_height
+                    orientation: 'vertical'
+                    spacing: dp(5)
+                    padding: dp(5)
 
         BoxLayout:
             size_hint_y: None
-            height: 48
-            spacing: 10
+            height: dp(48)
+            spacing: dp(10)
 
             StyledButton:
                 text: "Назад"
@@ -1375,38 +1437,64 @@ FinanceManager:
 # ---------------------------
 class FinanceApp(App):
     def build(self):
-        # При запуске проверяем и обновляем курсы валют
-        if "currencies" not in data or not data["currencies"]:
-            print("Курсы валют не найдены, загружаем с сайта ЦБ...")
+        self.data = load_data()
+        if "currencies" not in self.data or not self.data["currencies"]:
+            logging.info("Курсы валют не найдены, загружаем с сайта ЦБ...")
             update_exchange_rates()
         else:
-            # Попробуем тихо обновить курсы (если есть интернет)
             try:
                 Thread(target=update_exchange_rates).start()
-                print("Курсы валют успешно обновлены при запуске.")
             except Exception as e:
-                print("Не удалось обновить курсы при запуске:", e)
+                logging.error(f"Не удалось обновить курсы при запуске: {e}")
 
         return Builder.load_string(kv)
 
     def on_start(self):
         try:
-            stasts = self.root.get_screen("stats")
-            stasts.start_preload()
+            stats = self.root.get_screen("stats")
+            stats.start_preload()
         except Exception as e:
-            print("Не удалось сделать пердзагрузку статистики:", e)
+            logging.error(f"Не удалось сделать предзагрузку статистики: {e}")
 
     def generate_report_action(self):
-        """Вызывается при нажатии кнопки 'Сформировать отчёт'"""
-        filename = generate_report(data)
-        if filename:
-            Popup(title="Отчёт создан",
-                  content=Label(text=f"Файл сохранён: {filename}"),
-                  size_hint=(0.7, 0.4)).open()
-        else:
-            Popup(title="Ошибка",
-                  content=Label(text="Не удалось создать отчёт."),
-                  size_hint=(0.6, 0.3)).open()
+        """Самая простая и стабильная версия — только txt + понятное сообщение"""
+        result = generate_report(self.data)
+        if not result:
+            Popup(title="Ошибка", content=Label(text="Не удалось создать отчёт")).open()
+            return
+
+        internal_path = result["internal"]
+        downloads_path = result.get("downloads")
+        in_downloads = False
+
+        content = BoxLayout(orientation="vertical", padding=dp(25), spacing=dp(20))
+
+        message = "Отчёт успешно сохранён!\n" \
+                      "И доступен в папке Загрузки[/b]"
+
+        label = Label(
+            text=message,
+            markup=True,
+            halign="center",
+            valign="middle",
+            font_size=sp(19),
+            line_height=1.7
+        )
+        label.bind(size=lambda *x: setattr(label, 'text_size', label.size))
+
+        content.add_widget(label)
+
+        close_btn = Button(text="Готово", size_hint_y=None, height=dp(50))
+        content.add_widget(close_btn)
+
+        popup = Popup(
+            title="Готово",
+            content=content,
+            size_hint=(0.8, 0.5),
+            auto_dismiss=False
+        )
+        popup.open()
+        close_btn.bind(on_release=popup.dismiss)
 
 if __name__ == "__main__":
     FinanceApp().run()
