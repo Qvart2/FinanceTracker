@@ -228,74 +228,53 @@ class WalletScreen(Screen):
                 continue
             rate = rates.get(wallet["currency"], 1)
             try:
-                rub_value = float(wallet["balance"]) * rate
+                balance = float(wallet["balance"])
+                rub_value = balance * rate
             except (TypeError, ValueError):
+                balance = 0.0
                 rub_value = 0.0
-            text = f"Имя: {wallet['name']}, Баланс: {wallet['balance']} {wallet['currency']} (≈ {rub_value:.2f} RUB)"
+            text = f"Имя: {wallet['name']}, Баланс: {balance:.2f} {wallet['currency']} (≈ {rub_value:.2f} RUB)"
             data_list.append({'text': text, 'name': wallet['name']})
         self.ids.wallet_rv.data = data_list
 
     def show_add_wallet_form(self, *args):
         """Показывает форму для добавления кошелька."""
         from kivy.uix.spinner import Spinner
+        app = App.get_running_app()
+        currencies = list(app.data.get("currencies", {"RUB": 1.0}).keys())
 
         box = BoxLayout(orientation="vertical", spacing=10, padding=10)
+
         self.wallet_name_input = TextInput(hint_text="Имя кошелька", multiline=False)
         box.add_widget(self.wallet_name_input)
-
-        currencies = ["RUB", "USD", "EUR"]
 
         self.wallet_currency_spinner = Spinner(
             text="Выберите валюту",
             values=currencies,
             size_hint_y=None,
-            height=dp(50)
+            height=44
         )
         box.add_widget(self.wallet_currency_spinner)
 
-        # Баланс
-        self.wallet_balance_input = TextInput(
-            hint_text="Баланс",
-            multiline=False,
-            input_filter="float"
-        )
+        self.wallet_balance_input = TextInput(hint_text="Баланс", multiline=False, input_filter="float")
         box.add_widget(self.wallet_balance_input)
 
-        # Кнопка "Сохранить" (нормальной толщины)
-        save_button = Button(
-            text="Сохранить",
-            size_hint_y=None,
-            height=dp(50),
-            background_normal="",
-            background_color=(0.3, 0.5, 0.9, 1),
-            color=(1, 1, 1, 1),
-            font_size=sp(18)
-        )
+        save_button = Button(text="Сохранить", size_hint_y=None, height=44)
         save_button.bind(on_release=self.save_wallet)
         box.add_widget(save_button)
 
-        self.add_wallet_popup = Popup(
-            title="Добавить кошелёк",
-            content=box,
-            size_hint=(0.9, 0.6)
-        )
+        self.add_wallet_popup = Popup(title="Добавить кошелёк", content=box, size_hint=(0.9, 0.6))
         self.add_wallet_popup.open()
-
 
     def save_wallet(self, instance):
         """Сохраняет новый кошелёк и обновляет список."""
-
         name = (self.wallet_name_input.text or "").strip()
         balance_text = (self.wallet_balance_input.text or "0").strip()
         currency = self.wallet_currency_spinner.text
 
-        # Проверка выбора валюты
-        if not name or currency == "Выберите валюту":
-            Popup(
-                title="Ошибка",
-                content=Label(text="Введите имя и выберите валюту!"),
-                size_hint=(0.6, 0.3)
-            ).open()
+        if not name or not currency:
+            error_popup = Popup(title="Ошибка", content=Label(text="Введите имя и выберите валюту!"), size_hint=(0.6, 0.3))
+            error_popup.open()
             return
 
         try:
@@ -303,14 +282,9 @@ class WalletScreen(Screen):
             add_wallet(name, currency, balance)
             self.update_wallet_list()
             self.add_wallet_popup.dismiss()
-
         except ValueError:
-            Popup(
-                title="Ошибка",
-                content=Label(text="Неверный формат баланса!"),
-                size_hint=(0.6, 0.3)
-            ).open()
-
+            error_popup = Popup(title="Ошибка", content=Label(text="Неверный формат баланса!"), size_hint=(0.6, 0.3))
+            error_popup.open()
 
     def confirm_delete_wallet(self, name):
         """Показывает диалог подтверждения удаления кошелька."""
@@ -352,6 +326,17 @@ class WalletScreen(Screen):
 
         popup = Popup(title="Итоговый баланс", content=Label(text=total_balance_text), size_hint=(0.7, 0.5))
         popup.open()
+
+
+class WalletRow(RecycleDataViewBehavior, BoxLayout):
+    """Viewclass for wallet RecycleView"""
+    text = StringProperty()
+    name = StringProperty()
+    index = None
+
+    def refresh_view_attrs(self, rv, index, data):
+        self.index = index
+        super().refresh_view_attrs(rv, index, data)  # Замени на super() без аргументов
 
 
 class WalletRow(RecycleDataViewBehavior, BoxLayout):
@@ -980,19 +965,17 @@ kv = """
 <WalletRow>:
     orientation: "horizontal"
     size_hint_y: None
-    height: dp(80)
+    height: dp(48)
     spacing: dp(10)
-    padding: [dp(6), dp(6)]
+    padding: dp(6)
 
     Label:
         text: root.text
         size_hint_x: 0.8
-        size_hint_y: None
         halign: "left"
         valign: "middle"
         color: (0, 0, 0, 1)
-
-        text_size: self.width, None
+        text_size: self.size
 
     Button:
         text: "Удалить"
@@ -1138,7 +1121,7 @@ FinanceManager:
     BoxLayout:
         orientation: "vertical"
         spacing: dp(10)
-        padding: dp(20)
+        padding: dp(15)
         canvas.before:
             Color:
                 rgba: rgba("#F0F0F0")
@@ -1158,7 +1141,7 @@ FinanceManager:
                 id: wallet_rv
                 viewclass: 'WalletRow'
                 RecycleBoxLayout:
-                    default_size: None, dp(40)
+                    default_size: None, dp(48)
                     default_size_hint: 1, None
                     size_hint_y: None
                     height: self.minimum_height
