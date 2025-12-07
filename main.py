@@ -240,41 +240,64 @@ class WalletScreen(Screen):
     def show_add_wallet_form(self, *args):
         """Показывает форму для добавления кошелька."""
         from kivy.uix.spinner import Spinner
-        app = App.get_running_app()
-        currencies = list(app.data.get("currencies", {"RUB": 1.0}).keys())
 
         box = BoxLayout(orientation="vertical", spacing=10, padding=10)
 
+        # Имя кошелька
         self.wallet_name_input = TextInput(hint_text="Имя кошелька", multiline=False)
         box.add_widget(self.wallet_name_input)
+
+        currencies = ["RUB", "USD", "EUR"]
 
         self.wallet_currency_spinner = Spinner(
             text="Выберите валюту",
             values=currencies,
             size_hint_y=None,
-            height=44
+            height=dp(50)
         )
         box.add_widget(self.wallet_currency_spinner)
 
-        self.wallet_balance_input = TextInput(hint_text="Баланс", multiline=False, input_filter="float")
+        # Баланс
+        self.wallet_balance_input = TextInput(
+            hint_text="Баланс",
+            multiline=False,
+            input_filter="float"
+        )
         box.add_widget(self.wallet_balance_input)
 
-        save_button = Button(text="Сохранить", size_hint_y=None, height=44)
+        save_button = Button(
+            text="Сохранить",
+            size_hint_y=None,
+            height=dp(50),
+            background_normal="",
+            background_color=(0.3, 0.5, 0.9, 1),
+            color=(1, 1, 1, 1),
+            font_size=sp(18)
+        )
         save_button.bind(on_release=self.save_wallet)
         box.add_widget(save_button)
 
-        self.add_wallet_popup = Popup(title="Добавить кошелёк", content=box, size_hint=(0.9, 0.6))
+        self.add_wallet_popup = Popup(
+            title="Добавить кошелёк",
+            content=box,
+            size_hint=(0.9, 0.6)
+        )
         self.add_wallet_popup.open()
 
     def save_wallet(self, instance):
         """Сохраняет новый кошелёк и обновляет список."""
+
         name = (self.wallet_name_input.text or "").strip()
         balance_text = (self.wallet_balance_input.text or "0").strip()
         currency = self.wallet_currency_spinner.text
 
-        if not name or not currency:
-            error_popup = Popup(title="Ошибка", content=Label(text="Введите имя и выберите валюту!"), size_hint=(0.6, 0.3))
-            error_popup.open()
+        # Проверка выбора валюты
+        if not name or currency == "Выберите валюту":
+            Popup(
+                title="Ошибка",
+                content=Label(text="Введите имя и выберите валюту!"),
+                size_hint=(0.6, 0.3)
+            ).open()
             return
 
         try:
@@ -282,9 +305,14 @@ class WalletScreen(Screen):
             add_wallet(name, currency, balance)
             self.update_wallet_list()
             self.add_wallet_popup.dismiss()
+
         except ValueError:
-            error_popup = Popup(title="Ошибка", content=Label(text="Неверный формат баланса!"), size_hint=(0.6, 0.3))
-            error_popup.open()
+            Popup(
+                title="Ошибка",
+                content=Label(text="Неверный формат баланса!"),
+                size_hint=(0.6, 0.3)
+            ).open()
+
 
     def confirm_delete_wallet(self, name):
         """Показывает диалог подтверждения удаления кошелька."""
