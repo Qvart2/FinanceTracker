@@ -933,15 +933,6 @@ kv = """
         Rectangle:
             pos: self.pos
             size: self.size
-    Label:
-        color: 0, 0, 0, 1
-        text_size: self.size
-        halign: "left"
-        valign: "middle"
-        padding: [dp(10), dp(5)]
-    Button:
-        color: 1, 1, 1, 1
-        font_size: sp(15)
 
 <StyledButton@Button>:
     size_hint_y: None
@@ -988,17 +979,19 @@ kv = """
 <RecordRow>:
     orientation: "horizontal"
     size_hint_y: None
-    height: dp(44)
+    height: self.minimum_height
     spacing: dp(8)
     padding: [dp(6), dp(6)]
 
     Label:
         text: root.text
         size_hint_x: 0.78
+        size_hint_y: None
+        text_size: self.width, None
+        height: self.texture_size[1]
         halign: "left"
-        valign: "middle"
+        valign: "top"
         color: (0, 0, 0, 1)
-        text_size: self.size
 
     Button:
         text: "Удалить"
@@ -1007,6 +1000,7 @@ kv = """
         background_color: (0.8,0.2,0.2,1)
         color: (1,1,1,1)
         on_release: app.root.get_screen('expenses').confirm_delete_record(root.key, root.rid)
+
 
 <CategoryRow>:
     orientation: "horizontal"
