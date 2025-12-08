@@ -109,46 +109,65 @@ def update_exchange_rates(show_popup=False):
 
 
 def move_to_trash(key, rec_id):
-    """Перемещает запись в корзину и корректирует баланс кошелька"""
+    """Перемещает запись в корзину, корректирует баланс и логирует шаги."""
     app = App.get_running_app()
     records = app.data.get(key) or []
     rec = next((r for r in records if r.get("id") == rec_id), None)
-    if rec:
-        # Корректируем баланс
-        wallet_name = rec.get("wallet")
-        amount = float(rec.get("amount", 0))
-        sign = -1 if key == "incomes" else 1  # Для доходов вычитаем, для расходов прибавляем
-        wallet = next((w for w in app.data.get("wallets", []) if w.get("name") == wallet_name), None)
-        if wallet:
-            wallet["balance"] = float(wallet.get("balance", 0)) + sign * amount
+    if not rec:
+        print(f"[WARN] Запись id={rec_id} для {key} не найдена, корзина без изменений")
+        return
 
-        # Добавляем метку времени и тип записи
-        rec["deleted_at"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        rec["record_type"] = key
-        app.data["deleted_records"].append(rec)
-        # Удаляем из исходного списка
-        app.data[key] = [r for r in records if r.get("id") != rec_id]
-        save_data(app.data)
+    # Корректируем баланс
+    wallet_name = rec.get("wallet")
+    amount = float(rec.get("amount", 0))
+    sign = -1 if key == "incomes" else 1  # Для доходов вычитаем, для расходов прибавляем
+    wallet = next((w for w in app.data.get("wallets", []) if w.get("name") == wallet_name), None)
+    if wallet:
+        wallet["balance"] = float(wallet.get("balance", 0)) + sign * amount
+
+    # Добавляем метку времени и тип записи
+    rec["deleted_at"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    rec["record_type"] = key
+    print(f"[DEBUG] В корзину добавлен id={rec_id}, тип={key}")
+
+    app.data.setdefault("deleted_records", []).append(rec)
+    # Удаляем из исходного списка
+    app.data[key] = [r for r in records if r.get("id") != rec_id]
+    save_data(app.data)
 
 
 def restore_from_trash(rec_id):
-    """Восстановление записи из корзины и корректировка баланса"""
+    """Восстановление записи из корзины с проверками и корректировкой баланса."""
     app = App.get_running_app()
     trash = app.data.get("deleted_records") or []
-    rec = next((r for r in trash if r.get("id") == rec_id), None)
-    if rec:
-        key = rec["record_type"]
-        # Корректируем баланс обратно
-        wallet_name = rec.get("wallet")
-        amount = float(rec.get("amount", 0))
-        sign = 1 if key == "incomes" else -1  # Для доходов прибавляем, для расходов вычитаем
-        wallet = next((w for w in app.data.get("wallets", []) if w.get("name") == wallet_name), None)
-        if wallet:
-            wallet["balance"] = float(wallet.get("balance", 0)) + sign * amount
+    print(f"[DEBUG] Попытка восстановить id={rec_id}. Текущие ID в корзине: {[r.get('id') for r in trash]}")
 
-        app.data.setdefault(key, []).append(rec)
-        app.data["deleted_records"] = [r for r in trash if r.get("id") != rec_id]
-        save_data(app.data)
+    rec = next((r for r in trash if r.get("id") == rec_id), None)
+    if not rec:
+        print(f"[WARN] Запись id={rec_id} не найдена в корзине")
+        return
+
+    key = rec.get("record_type")
+    if key not in ["incomes", "expenses"]:
+        print(f"[ERROR] Некорректный record_type при восстановлении: {key}")
+        return
+
+    # Корректируем баланс обратно
+    wallet_name = rec.get("wallet")
+    amount = float(rec.get("amount", 0))
+    sign = 1 if key == "incomes" else -1  # Для доходов прибавляем, для расходов вычитаем
+    wallet = next((w for w in app.data.get("wallets", []) if w.get("name") == wallet_name), None)
+    if wallet:
+        wallet["balance"] = float(wallet.get("balance", 0)) + sign * amount
+
+    app.data.setdefault(key, []).append(rec)
+
+    # Удаляем только конкретную запись (учитываем тип)
+    app.data["deleted_records"] = [
+        r for r in trash if not (r.get("id") == rec_id and r.get("record_type") == key)
+    ]
+    print(f"[DEBUG] Восстановлен id={rec_id}, тип={key}. Осталось в корзине: {[r.get('id') for r in app.data['deleted_records']]}")
+    save_data(app.data)
 
 
 def permanently_delete_from_trash(rec_id):
@@ -538,7 +557,7 @@ class ExpenseScreen(Screen):
                 Popup(title="Ошибка", content=Label(text="Недостаточно средств в кошельке!"), size_hint=(0.6, 0.3)).open()
                 return
 
-        new_id = self.numbering_id(key)
+        new_id = self.numbering_id()
         record = {
             "id": new_id,
             "currency": wallet.get("currency", "RUB"),
@@ -587,18 +606,26 @@ class ExpenseScreen(Screen):
         self.del_popup.dismiss()
 
     @staticmethod
-    def numbering_id(key):
-        """Нумерация id"""
+    def numbering_id():
+        """Нумерация id: учитываем доходы, расходы и корзину, чтобы не пересекались."""
         app = App.get_running_app()
-        rec = app.data.get(key) or []
-        existing = set()
-        for item in rec:
+        all_ids = set()
+
+        for key in ["incomes", "expenses"]:
+            for record in app.data.get(key, []):
+                try:
+                    all_ids.add(int(record.get("id", 0)))
+                except (ValueError, TypeError):
+                    pass
+
+        for record in app.data.get("deleted_records", []):
             try:
-                existing.add(int(item.get("id", 0)))
-            except ValueError:
+                all_ids.add(int(record.get("id", 0)))
+            except (ValueError, TypeError):
                 pass
+
         new_id = 1
-        while new_id in existing:
+        while new_id in all_ids:
             new_id += 1
         return new_id
 
